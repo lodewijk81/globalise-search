@@ -111,16 +111,16 @@ async function getThumbnailUrl(documentId) {
     const manifest = await response.json();
     const canvases = Array.isArray(manifest?.items) ? manifest.items : [];
 
-    for (const canvas of canvases) {
-      const annotationPage = canvas?.items?.[0];
-      const body = annotationPage?.items?.[0]?.body;
+    const canvas = canvases.find((item) => typeof item?.id === 'string' && item.id.endsWith(documentId));
 
-      if (body && typeof body === 'object' && body.id) {
-        return body.id;
-      }
+    if (!canvas) {
+      return '';
     }
 
-    return '';
+    const annotationPage = canvas?.items?.[0];
+    const body = annotationPage?.items?.[0]?.body;
+
+    return body && typeof body === 'object' && body.id ? body.id : '';
   } catch (error) {
     console.warn(`Unable to load thumbnail for ${documentId}:`, error);
     return '';
