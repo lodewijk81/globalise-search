@@ -64,13 +64,17 @@ function getYearValue(result) {
   return null;
 }
 
-function buildViewerUrl(documentId) {
+function getInventoryNumber(documentId) {
   if (!documentId || typeof documentId !== 'string') {
-    return '#';
+    return null;
   }
 
   const inventoryMatch = documentId.match(/_(\d+)_\d+$/) || documentId.match(/_(\d+)$/);
-  const inventoryNumber = inventoryMatch ? inventoryMatch[1] : null;
+  return inventoryMatch ? inventoryMatch[1] : null;
+}
+
+function buildViewerUrl(documentId) {
+  const inventoryNumber = getInventoryNumber(documentId);
 
   if (!inventoryNumber) {
     return '#';
@@ -84,6 +88,43 @@ function buildViewerUrl(documentId) {
   });
 
   return `https://dev.globalise.nl/manifest?${params.toString()}`;
+}
+
+async function getThumbnailUrl(documentId) {
+  const inventoryNumber = getInventoryNumber(documentId);
+
+  if (!inventoryNumber) {
+    return '';
+  }
+
+  const manifestUrl = `https://data.globalise.huygens.knaw.nl/hdl:20.500.14722/inventory:${inventoryNumber}.manifest`;
+
+  try {
+    const response = await fetch(manifestUrl, {
+      headers: { Accept: 'application/json' },
+    });
+
+    if (!response.ok) {
+      return '';
+    }
+
+    const manifest = await response.json();
+    const canvases = Array.isArray(manifest?.items) ? manifest.items : [];
+
+    for (const canvas of canvases) {
+      const annotationPage = canvas?.items?.[0];
+      const body = annotationPage?.items?.[0]?.body;
+
+      if (body && typeof body === 'object' && body.id) {
+        return body.id;
+      }
+    }
+
+    return '';
+  } catch (error) {
+    console.warn(`Unable to load thumbnail for ${documentId}:`, error);
+    return '';
+  }
 }
 
 function getHighlightText(result) {
@@ -191,7 +232,7 @@ async function search(query, page, sortKey = 'relevance') {
     getSortOptionState(results);
 
     const sortedResults = sortResults(results, currentSort);
-    renderResults(sortedResults, totalHits, page, trimmedQuery, currentSort);
+    await renderResults(sortedResults, totalHits, page, trimmedQuery, currentSort);
   } catch (error) {
     console.error(error);
     if (statusContainer) {
@@ -203,7 +244,7 @@ async function search(query, page, sortKey = 'relevance') {
   }
 }
 
-function renderResults(results, totalHits, page, query, sortKey) {
+async function renderResults(results, totalHits, page, query, sortKey) {
   const totalPages = Math.max(1, Math.ceil(totalHits / pageSize));
   const startIndex = totalHits === 0 ? 0 : (page - 1) * pageSize + 1;
   const endIndex = Math.min(page * pageSize, totalHits);
@@ -224,29 +265,37 @@ function renderResults(results, totalHits, page, query, sortKey) {
     return;
   }
 
-  const listHtml = results
-    .map((result) => {
+  const listHtml = await Promise.all(
+    results.map(async (result) => {
       const documentId = result.document || result._id || 'Unknown document';
       const viewerUrl = buildViewerUrl(documentId);
       const snippet = getHighlightText(result);
       const invNr = result.invNr || 'Unknown inventory';
       const language = Array.isArray(result.langLabel) ? result.langLabel.join(', ') : 'Unknown';
       const year = getYearValue(result);
+      const thumbnailUrl = await getThumbnailUrl(documentId);
 
       return `
         <article class="result-item">
-          <div class="result-meta">
-            <h2 class="result-title"><a href="${viewerUrl}">${escapeHtml(documentId)}</a></h2>
-            <small>${year !== null ? `${escapeHtml(year)} · ` : ''}Inventory ${escapeHtml(invNr)} · ${escapeHtml(language)}</small>
+          <div class="result-figure">
+            ${thumbnailUrl
+              ? `<img src="${thumbnailUrl}" alt="Thumbnail for ${escapeHtml(documentId)}" loading="lazy" />`
+              : '<div class="result-thumb-placeholder">No image</div>'}
           </div>
-          <p class="result-snippet">${snippet}</p>
-          <div class="result-footer">
-            <a href="${viewerUrl}">Open in viewer</a>
+          <div class="result-content">
+            <div class="result-meta">
+              <h2 class="result-title"><a href="${viewerUrl}">${escapeHtml(documentId)}</a></h2>
+              <small>${year !== null ? `${escapeHtml(year)} · ` : ''}Inventory ${escapeHtml(invNr)} · ${escapeHtml(language)}</small>
+            </div>
+            <p class="result-snippet">${snippet}</p>
+            <div class="result-footer">
+              <a href="${viewerUrl}">Open in viewer</a>
+            </div>
           </div>
         </article>
       `;
     })
-    .join('');
+  ).then((items) => items.join(''));
 
   if (resultsContainer) {
     resultsContainer.innerHTML = listHtml;
