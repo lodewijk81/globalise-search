@@ -281,7 +281,7 @@ async function renderResults(results, totalHits, page, query, sortKey) {
         <article class="result-item">
           <div class="result-figure">
             ${thumbnailUrl
-              ? `<img src="${thumbnailUrl}" alt="Thumbnail for ${escapeHtml(documentId)}" loading="lazy" />`
+              ? `<a href="${viewerUrl}"><img src="${thumbnailUrl}" alt="Thumbnail for ${escapeHtml(documentId)}" loading="lazy" /></a>`
               : '<div class="result-thumb-placeholder">No image</div>'}
           </div>
           <div class="result-content">
