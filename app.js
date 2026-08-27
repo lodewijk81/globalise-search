@@ -120,7 +120,9 @@ async function getThumbnailUrl(documentId) {
     const annotationPage = canvas?.items?.[0];
     const body = annotationPage?.items?.[0]?.body;
 
-    return body && typeof body === 'object' && body.id ? body.id : '';
+    return body && typeof body === 'object' && body.id
+      ? body.id.replace('/full/max/', '/full/400,/')
+      : '';
   } catch (error) {
     console.warn(`Unable to load thumbnail for ${documentId}:`, error);
     return '';
