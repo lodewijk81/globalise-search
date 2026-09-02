@@ -12,20 +12,61 @@ const pageSize = 10;
 let currentSort = 'relevance';
 let currentPage = 1;
 let currentQuery = '';
+let currentChips = [];
 let currentResults = [];
+
+// Structured search fields exposed by the "documents" index, selectable via "field:value" in the search bar.
+const FIELD_DEFS = [
+  { key: 'person', label: 'Person', hint: 'Find persons mentioned in the text', kind: 'nested', type: 'Person' },
+  { key: 'place', label: 'Place', hint: 'Find places mentioned in the text', kind: 'nested', type: 'Place', aliases: ['location'] },
+  { key: 'profession', label: 'Profession', hint: 'Find by profession', kind: 'text', field: 'professionLabelPaths' },
+  { key: 'documenttype', label: 'Document type', hint: 'Find by document type, e.g. brief', kind: 'text', field: 'documentTypeLabelPaths', aliases: ['type', 'doctype'] },
+  { key: 'settlement', label: 'Settlement', hint: 'Find by settlement', kind: 'keyword', field: 'settlement' },
+  { key: 'inventory', label: 'Inventory number', hint: 'Find by exact inventory number', kind: 'keyword', field: 'inventoryNumber', exact: true, aliases: ['inv', 'invnr'] },
+  { key: 'year', label: 'Year', hint: 'e.g. 1685 or 1680-1690', kind: 'year', aliases: ['date'] },
+];
+
+const FIELD_BY_KEY = new Map(FIELD_DEFS.map((def) => [def.key, def]));
+const FIELD_ALIASES = new Map();
+FIELD_DEFS.forEach((def) => {
+  FIELD_ALIASES.set(def.key, def.key);
+  (def.aliases || []).forEach((alias) => FIELD_ALIASES.set(alias, def.key));
+});
 
 function getSearchParams() {
   const params = new URLSearchParams(window.location.search);
+  const filters = params.get('filters') || '';
+  const q = params.get('q');
   return {
-    q: params.get('q') || 'corea~1',
+    q: q !== null ? q : filters ? '' : 'corea~1',
     page: Number(params.get('page')) || 1,
     sort: params.get('sort') || 'relevance',
+    filters,
   };
 }
 
-function updateQueryState(query, page, sort) {
+function encodeChips(chips) {
+  return chips.map((chip) => `${chip.fieldKey}:${encodeURIComponent(chip.value)}`).join('|');
+}
+
+function decodeChips(raw) {
+  if (!raw) return [];
+  return raw
+    .split('|')
+    .map((part) => {
+      const separatorIndex = part.indexOf(':');
+      if (separatorIndex === -1) return null;
+      const fieldKey = part.slice(0, separatorIndex);
+      const value = decodeURIComponent(part.slice(separatorIndex + 1));
+      return FIELD_BY_KEY.has(fieldKey) && value ? { fieldKey, value } : null;
+    })
+    .filter(Boolean);
+}
+
+function updateQueryState(query, chips, page, sort) {
   const params = new URLSearchParams();
   if (query) params.set('q', query);
+  if (chips.length) params.set('filters', encodeChips(chips));
   if (page > 1) params.set('page', String(page));
   if (sort && sort !== 'relevance') params.set('sort', sort);
 
@@ -40,6 +81,277 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
+}
+
+function escapeWildcardValue(value) {
+  return String(value).replace(/([\\*?])/g, '\\$1');
+}
+
+// Turns a chip (field:value) into an Elasticsearch query clause against the "documents" index.
+function chipToEsClause(chip) {
+  const def = FIELD_BY_KEY.get(chip.fieldKey);
+  const value = (chip.value || '').trim();
+  if (!def || !value) return null;
+
+  if (def.kind === 'nested') {
+    return {
+      nested: {
+        path: 'observances',
+        query: {
+          bool: {
+            filter: [{ term: { 'observances.type': def.type } }],
+            must: [
+              {
+                wildcard: {
+                  'observances.label': {
+                    value: `*${escapeWildcardValue(value)}*`,
+                    case_insensitive: true,
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
+    };
+  }
+
+  if (def.kind === 'text') {
+    return { match: { [def.field]: value } };
+  }
+
+  if (def.kind === 'keyword') {
+    return def.exact
+      ? { term: { [def.field]: value } }
+      : { wildcard: { [def.field]: { value: `*${escapeWildcardValue(value)}*`, case_insensitive: true } } };
+  }
+
+  if (def.kind === 'year') {
+    return buildYearRangeClause(value);
+  }
+
+  return null;
+}
+
+function buildYearRangeClause(value) {
+  const rangeMatch = value.match(/^(\d{3,4})\s*-\s*(\d{3,4})$/);
+  const singleMatch = value.match(/^(\d{3,4})$/);
+  let fromYear;
+  let toYear;
+
+  if (rangeMatch) {
+    [, fromYear, toYear] = rangeMatch;
+  } else if (singleMatch) {
+    fromYear = toYear = singleMatch[1];
+  } else {
+    return null;
+  }
+
+  return {
+    bool: {
+      filter: [
+        { range: { startDate: { lte: `${toYear}-12-31` } } },
+        { range: { endDate: { gte: `${fromYear}-01-01` } } },
+      ],
+    },
+  };
+}
+
+function buildEsQuery(keywordText, chips) {
+  const must = [];
+  if (keywordText) {
+    must.push({
+      query_string: {
+        query: keywordText,
+        default_field: 'text',
+        default_operator: 'AND',
+      },
+    });
+  }
+
+  const filter = chips.map(chipToEsClause).filter(Boolean);
+
+  return {
+    bool: {
+      ...(must.length ? { must } : {}),
+      ...(filter.length ? { filter } : {}),
+    },
+  };
+}
+
+function describeChips(chips) {
+  if (!chips.length) return '';
+  const parts = chips.map((chip) => `${FIELD_BY_KEY.get(chip.fieldKey).label}: “${escapeHtml(chip.value)}”`);
+  return ` with ${parts.join(', ')}`;
+}
+
+// Interactive "field:value" chip input: lets keyword search be combined with
+// structured filters such as person:, place:, profession:, settlement:, inventory: and year:.
+function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
+  let chips = [];
+  let currentSuggestions = [];
+
+  function renderChips() {
+    chipsEl.innerHTML = chips
+      .map(
+        (chip, index) => `
+          <span class="query-chip" data-index="${index}">
+            <span class="field-name">${escapeHtml(FIELD_BY_KEY.get(chip.fieldKey).label)}:</span>
+            <span>${escapeHtml(chip.value)}</span>
+            <button type="button" aria-label="Remove ${escapeHtml(FIELD_BY_KEY.get(chip.fieldKey).label)} filter">×</button>
+          </span>
+        `
+      )
+      .join('');
+
+    chipsEl.querySelectorAll('button[aria-label]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const index = Number(button.closest('.query-chip').dataset.index);
+        chips.splice(index, 1);
+        renderChips();
+        formEl.dispatchEvent(new CustomEvent('querybuilder:change'));
+      });
+    });
+  }
+
+  function getTrailingToken() {
+    const value = inputEl.value;
+    const match = value.match(/(^|\s)([a-zA-Z]+)\s*:\s*("([^"]*)"|(\S*))$/);
+    if (!match) return null;
+    const fieldKey = FIELD_ALIASES.get(match[2].toLowerCase());
+    if (!fieldKey) return null;
+    const tokenValue = match[4] !== undefined ? match[4] : match[5] || '';
+    return { fieldKey, value: tokenValue, start: match.index + match[1].length, end: value.length };
+  }
+
+  function getTrailingWord() {
+    const value = inputEl.value;
+    const match = value.match(/(^|\s)([a-zA-Z]+)$/);
+    if (!match) return null;
+    return { word: match[2], start: match.index + match[1].length, end: value.length };
+  }
+
+  function commitToken(token) {
+    if (!token.value) return false;
+    chips.push({ fieldKey: token.fieldKey, value: token.value });
+    inputEl.value = `${inputEl.value.slice(0, token.start)}${inputEl.value.slice(token.end)}`.replace(/\s+$/, '');
+    renderChips();
+    hideSuggestions();
+    return true;
+  }
+
+  function hideSuggestions() {
+    currentSuggestions = [];
+    suggestionsEl.hidden = true;
+    suggestionsEl.innerHTML = '';
+  }
+
+  function showFieldSuggestions(word, start) {
+    const lowerWord = word.toLowerCase();
+    const matches = FIELD_DEFS.filter((def) => def.key.startsWith(lowerWord));
+    if (!word || !matches.length) {
+      hideSuggestions();
+      return;
+    }
+    currentSuggestions = matches.map((def) => ({
+      apply: () => {
+        const cursor = start + def.key.length + 1;
+        inputEl.value = `${inputEl.value.slice(0, start)}${def.key}:${inputEl.value.slice(start + word.length)}`;
+        inputEl.focus();
+        inputEl.setSelectionRange(cursor, cursor);
+        updateSuggestions();
+      },
+      html: `<span class="field-name">${escapeHtml(def.key)}:</span><span class="hint">${escapeHtml(def.hint)}</span>`,
+    }));
+    renderSuggestions();
+  }
+
+  function showValueSuggestion(token) {
+    const def = FIELD_BY_KEY.get(token.fieldKey);
+    if (!token.value) {
+      currentSuggestions = [{ apply: null, html: `<span class="field-name">${escapeHtml(def.label)}:</span><span class="hint">${escapeHtml(def.hint)}</span>` }];
+    } else {
+      currentSuggestions = [
+        {
+          apply: () => {
+            commitToken(token);
+          },
+          html: `<span>Add filter — <span class="field-name">${escapeHtml(def.label)}</span>: “${escapeHtml(token.value)}”</span><span class="hint">Enter</span>`,
+        },
+      ];
+    }
+    renderSuggestions();
+  }
+
+  function renderSuggestions() {
+    if (!currentSuggestions.length) {
+      hideSuggestions();
+      return;
+    }
+    suggestionsEl.hidden = false;
+    suggestionsEl.innerHTML = currentSuggestions
+      .map((item, index) => `<div class="query-suggestion${item.apply ? '' : ' is-static'}" data-index="${index}">${item.html}</div>`)
+      .join('');
+
+    suggestionsEl.querySelectorAll('.query-suggestion').forEach((el) => {
+      el.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        const index = Number(el.dataset.index);
+        currentSuggestions[index]?.apply?.();
+      });
+    });
+  }
+
+  function updateSuggestions() {
+    const token = getTrailingToken();
+    if (token) {
+      showValueSuggestion(token);
+      return;
+    }
+    const word = getTrailingWord();
+    if (word && word.word) {
+      showFieldSuggestions(word.word, word.start);
+      return;
+    }
+    hideSuggestions();
+  }
+
+  inputEl.addEventListener('input', updateSuggestions);
+  inputEl.addEventListener('blur', () => {
+    window.setTimeout(hideSuggestions, 120);
+  });
+
+  inputEl.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      hideSuggestions();
+      return;
+    }
+    if (event.key === 'Tab' && currentSuggestions.length === 1 && currentSuggestions[0].apply && getTrailingWord()) {
+      event.preventDefault();
+      currentSuggestions[0].apply();
+      return;
+    }
+    if (event.key === 'Enter') {
+      const token = getTrailingToken();
+      if (token && token.value) {
+        event.preventDefault();
+        commitToken(token);
+        formEl.dispatchEvent(new CustomEvent('querybuilder:submit'));
+      }
+    }
+  });
+
+  return {
+    getChips: () => chips.slice(),
+    setChips: (next) => {
+      chips = next.slice();
+      renderChips();
+    },
+    getKeywordText: () => inputEl.value.trim(),
+    setKeywordText: (value) => {
+      inputEl.value = value;
+    },
+  };
 }
 
 function getYearValue(result) {
@@ -156,32 +468,28 @@ function getSortOptionState(results) {
   }
 }
 
-async function search(query, page, sortKey = 'relevance') {
-  const trimmedQuery = query.trim();
+async function search(keywordText, chips, page, sortKey = 'relevance') {
+  const trimmedQuery = (keywordText || '').trim();
+  const activeChips = chips || [];
 
-  if (!trimmedQuery) {
-    if (statusContainer) statusContainer.textContent = 'Please enter a search query.';
-    if (resultsContainer) resultsContainer.innerHTML = '<div class="empty-state">Please enter a search query.</div>';
+  if (!trimmedQuery && !activeChips.length) {
+    if (statusContainer) statusContainer.textContent = 'Please enter a search query or add a filter.';
+    if (resultsContainer) resultsContainer.innerHTML = '<div class="empty-state">Please enter a search query or add a filter.</div>';
     if (paginationContainer) paginationContainer.innerHTML = '';
     return;
   }
 
   currentQuery = trimmedQuery;
+  currentChips = activeChips;
   currentPage = page;
   currentSort = sortKey;
-  updateQueryState(trimmedQuery, page, sortKey);
+  updateQueryState(trimmedQuery, activeChips, page, sortKey);
 
   const from = (page - 1) * pageSize;
   const payload = {
     from,
     size: pageSize,
-    query: {
-      query_string: {
-        query: trimmedQuery,
-        default_field: 'text',
-        default_operator: 'AND',
-      },
-    },
+    query: buildEsQuery(trimmedQuery, activeChips),
     highlight: {
       pre_tags: ['<mark>'],
       post_tags: ['</mark>'],
@@ -221,7 +529,7 @@ async function search(query, page, sortKey = 'relevance') {
     getSortOptionState(results);
 
     const sortedResults = sortResults(results, currentSort);
-    await renderResults(sortedResults, totalHits, page, trimmedQuery, currentSort);
+    await renderResults(sortedResults, totalHits, page, trimmedQuery, activeChips, currentSort);
   } catch (error) {
     console.error(error);
     if (statusContainer) {
@@ -233,17 +541,19 @@ async function search(query, page, sortKey = 'relevance') {
   }
 }
 
-async function renderResults(results, totalHits, page, query, sortKey) {
+async function renderResults(results, totalHits, page, query, chips, sortKey) {
   const totalPages = Math.max(1, Math.ceil(totalHits / pageSize));
   const startIndex = totalHits === 0 ? 0 : (page - 1) * pageSize + 1;
   const endIndex = Math.min(page * pageSize, totalHits);
 
   const sortLabel = sortKey === 'inventory' ? 'inventory number' : sortKey === 'year' ? 'year' : 'relevance';
+  const queryLabel = query ? ` for “${escapeHtml(query)}”` : '';
+  const chipsLabel = describeChips(chips);
 
   if (statusContainer) {
     statusContainer.textContent = totalHits
-      ? `Showing ${startIndex}-${endIndex} of ${totalHits} results for “${escapeHtml(query)}” sorted by ${sortLabel}.`
-      : `No results found for “${escapeHtml(query)}”.`;
+      ? `Showing ${startIndex}-${endIndex} of ${totalHits} results${queryLabel}${chipsLabel}, sorted by ${sortLabel}.`
+      : `No results found${queryLabel}${chipsLabel}.`;
   }
 
   if (!results.length) {
@@ -289,10 +599,10 @@ async function renderResults(results, totalHits, page, query, sortKey) {
   if (resultsContainer) {
     resultsContainer.innerHTML = listHtml;
   }
-  renderPagination(page, totalPages, query, sortKey);
+  renderPagination(page, totalPages, query, chips, sortKey);
 }
 
-function renderPagination(page, totalPages, query, sortKey) {
+function renderPagination(page, totalPages, query, chips, sortKey) {
   const prevButton = `
     <button type="button" ${page <= 1 ? 'disabled' : ''} data-page="${Math.max(1, page - 1)}" aria-label="Previous page">
       Previous
@@ -317,7 +627,7 @@ function renderPagination(page, totalPages, query, sortKey) {
       button.addEventListener('click', () => {
         const targetPage = Number(button.dataset.page);
         if (!Number.isNaN(targetPage) && targetPage >= 1) {
-          search(query, targetPage, sortKey);
+          search(query, chips, targetPage, sortKey);
         }
       });
     });
@@ -327,42 +637,70 @@ function renderPagination(page, totalPages, query, sortKey) {
 function initLandingPage() {
   if (!landingForm) return;
 
+  const queryBuilder = createQueryBuilder({
+    formEl: landingForm,
+    chipsEl: document.querySelector('#landing-query-chips'),
+    inputEl: document.querySelector('#landing-search-input'),
+    suggestionsEl: document.querySelector('#landing-query-suggestions'),
+  });
+
+  const goToResults = () => {
+    const text = queryBuilder.getKeywordText();
+    const chips = queryBuilder.getChips();
+    if (!text && !chips.length) return;
+    const params = new URLSearchParams();
+    if (text) params.set('q', text);
+    if (chips.length) params.set('filters', encodeChips(chips));
+    window.location.href = `results.html?${params.toString()}`;
+  };
+
   landingForm.addEventListener('submit', (event) => {
     event.preventDefault();
-    const input = document.querySelector('#landing-search-input');
-    const query = (input?.value || '').trim();
-    if (!query) return;
-    window.location.href = `results.html?q=${encodeURIComponent(query)}`;
+    goToResults();
   });
+  landingForm.addEventListener('querybuilder:submit', goToResults);
 }
 
 function initResultsPage() {
   if (!resultsForm || !statusContainer || !resultsContainer || !paginationContainer) return;
 
-  const { q, page, sort } = getSearchParams();
-  currentQuery = q;
+  const { q, page, sort, filters } = getSearchParams();
   currentPage = page;
   currentSort = sort || 'relevance';
 
-  const input = document.querySelector('#results-search-input');
-  if (input) input.value = q;
+  const queryBuilder = createQueryBuilder({
+    formEl: resultsForm,
+    chipsEl: document.querySelector('#results-query-chips'),
+    inputEl: document.querySelector('#results-search-input'),
+    suggestionsEl: document.querySelector('#results-query-suggestions'),
+  });
+  queryBuilder.setKeywordText(q);
+  queryBuilder.setChips(decodeChips(filters));
+
   if (sortSelect) sortSelect.value = currentSort;
+
+  const runSearch = (targetPage) => {
+    const text = queryBuilder.getKeywordText();
+    const chips = queryBuilder.getChips();
+    if (!text && !chips.length) return;
+    search(text, chips, targetPage, currentSort);
+  };
 
   resultsForm.addEventListener('submit', (event) => {
     event.preventDefault();
-    const nextQuery = (input?.value || '').trim();
-    if (!nextQuery) return;
-    search(nextQuery, 1, currentSort);
+    runSearch(1);
   });
+  resultsForm.addEventListener('querybuilder:submit', () => runSearch(1));
+  resultsForm.addEventListener('querybuilder:change', () => runSearch(1));
 
   if (sortSelect) {
     sortSelect.addEventListener('change', (event) => {
-      const nextSort = event.target.value;
-      search(currentQuery, 1, nextSort);
+      currentSort = event.target.value;
+      search(currentQuery, currentChips, 1, currentSort);
     });
   }
 
-  search(q, page, currentSort);
+  runSearch(page);
 }
 
 if (pageType === 'landing') {

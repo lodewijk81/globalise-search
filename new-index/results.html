@@ -75,14 +75,19 @@
           autocomplete="off"
         >
           <label class="sr-only" for="results-search-input">Search</label>
-          <input
-            id="results-search-input"
-            type="text"
-            name="q"
-            value="corea~1"
-            placeholder="Search the corpus"
-            aria-label="Search query"
-          />
+          <div class="query-builder" id="results-query-builder">
+            <div class="query-chips" id="results-query-chips"></div>
+            <input
+              id="results-search-input"
+              type="text"
+              name="q"
+              value="corea~1"
+              placeholder="Search the corpus, or type person:, place:, profession:…"
+              aria-label="Search query"
+              autocomplete="off"
+            />
+            <div class="query-suggestions" id="results-query-suggestions" hidden></div>
+          </div>
           <button type="submit">Search</button>
         </form>
       </div>

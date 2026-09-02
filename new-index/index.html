@@ -89,20 +89,27 @@
               autocomplete="off"
             >
               <label class="sr-only" for="landing-search-input">Search</label>
-              <input
-                id="landing-search-input"
-                name="q"
-                type="text"
-                value=""
-                placeholder="Search for a keyword or combination of keywords"
-                aria-label="Search the GLOBALISE corpus"
-              />
+              <div class="query-builder" id="landing-query-builder">
+                <div class="query-chips" id="landing-query-chips"></div>
+                <input
+                  id="landing-search-input"
+                  name="q"
+                  type="text"
+                  value=""
+                  placeholder="Search for a keyword, or type person:, place:, profession:…"
+                  aria-label="Search the GLOBALISE corpus"
+                  autocomplete="off"
+                />
+                <div class="query-suggestions" id="landing-query-suggestions" hidden></div>
+              </div>
               <button type="submit">Search</button>
             </form>
 
             <p class="query-help">
               Elasticsearch syntax supported: AND, OR, NOT, parentheses,
-              wildcards and fuzziness.
+              wildcards and fuzziness. Combine with structured filters such as
+              <code>person:</code>, <code>place:</code>, <code>profession:</code>,
+              <code>settlement:</code>, <code>inventory:</code> or <code>year:</code>.
             </p>
           </div>
         </section>
