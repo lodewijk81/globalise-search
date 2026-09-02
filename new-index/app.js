@@ -386,13 +386,20 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
       currentSuggestions[0].apply();
       return;
     }
+    if (event.key === 'Backspace' && inputEl.value === '' && chips.length) {
+      event.preventDefault();
+      chips.pop();
+      renderChips();
+      hideSuggestions();
+      formEl.dispatchEvent(new CustomEvent('querybuilder:change'));
+      return;
+    }
     if (event.key === 'Enter') {
       const token = getTrailingToken();
       if (token && token.value) {
         event.preventDefault();
         const previewEl = suggestionsEl.querySelector('.query-chip-preview');
         commitToken(token, previewEl);
-        formEl.dispatchEvent(new CustomEvent('querybuilder:submit'));
       }
     }
   });
@@ -714,7 +721,6 @@ function initLandingPage() {
     event.preventDefault();
     goToResults();
   });
-  landingForm.addEventListener('querybuilder:submit', goToResults);
 }
 
 function initResultsPage() {
@@ -746,7 +752,6 @@ function initResultsPage() {
     event.preventDefault();
     runSearch(1);
   });
-  resultsForm.addEventListener('querybuilder:submit', () => runSearch(1));
   resultsForm.addEventListener('querybuilder:change', () => runSearch(1));
 
   if (sortSelect) {
