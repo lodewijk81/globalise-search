@@ -195,7 +195,7 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
     chipsEl.innerHTML = chips
       .map(
         (chip, index) => `
-          <span class="query-chip" data-index="${index}">
+          <span class="query-chip" data-index="${index}" data-field="${chip.fieldKey}">
             <span class="field-name">${escapeHtml(FIELD_BY_KEY.get(chip.fieldKey).label)}:</span>
             <span>${escapeHtml(chip.value)}</span>
             <button type="button" aria-label="Remove ${escapeHtml(FIELD_BY_KEY.get(chip.fieldKey).label)} filter">×</button>
@@ -212,6 +212,44 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
         formEl.dispatchEvent(new CustomEvent('querybuilder:change'));
       });
     });
+  }
+
+  // Animates a suggestion chip preview flying from the dropdown into its final spot among the committed chips.
+  function animateChipFlight(sourceEl, chipIndex) {
+    const newChipEl = chipsEl.querySelector(`.query-chip[data-index="${chipIndex}"]`);
+    if (!sourceEl || !newChipEl) return;
+
+    const sourceRect = sourceEl.getBoundingClientRect();
+    const targetRect = newChipEl.getBoundingClientRect();
+
+    const clone = sourceEl.cloneNode(true);
+    clone.classList.add('query-chip-flying');
+    clone.style.left = `${sourceRect.left}px`;
+    clone.style.top = `${sourceRect.top}px`;
+    clone.style.width = `${sourceRect.width}px`;
+    clone.style.height = `${sourceRect.height}px`;
+    clone.style.margin = '0';
+    clone.style.transformOrigin = 'top left';
+    document.body.appendChild(clone);
+
+    newChipEl.style.visibility = 'hidden';
+
+    const dx = targetRect.left - sourceRect.left;
+    const dy = targetRect.top - sourceRect.top;
+    const scaleX = targetRect.width / sourceRect.width;
+    const scaleY = targetRect.height / sourceRect.height;
+
+    const finish = () => {
+      clone.remove();
+      newChipEl.style.visibility = '';
+    };
+
+    requestAnimationFrame(() => {
+      clone.style.transition = 'transform 0.32s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.32s ease';
+      clone.style.transform = `translate(${dx}px, ${dy}px) scale(${scaleX}, ${scaleY})`;
+    });
+    clone.addEventListener('transitionend', finish, { once: true });
+    window.setTimeout(finish, 500);
   }
 
   function getTrailingToken() {
@@ -231,11 +269,12 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
     return { word: match[2], start: match.index + match[1].length, end: value.length };
   }
 
-  function commitToken(token) {
+  function commitToken(token, sourceEl) {
     if (!token.value) return false;
     chips.push({ fieldKey: token.fieldKey, value: token.value });
     inputEl.value = `${inputEl.value.slice(0, token.start)}${inputEl.value.slice(token.end)}`.replace(/\s+$/, '');
     renderChips();
+    if (sourceEl) animateChipFlight(sourceEl, chips.length - 1);
     hideSuggestions();
     return true;
   }
@@ -261,7 +300,10 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
         inputEl.setSelectionRange(cursor, cursor);
         updateSuggestions();
       },
-      html: `<span class="field-name">${escapeHtml(def.key)}:</span><span class="hint">${escapeHtml(def.hint)}</span>`,
+      html: `
+        <span class="query-chip query-chip-preview" data-field="${def.key}"><span class="field-name">${escapeHtml(def.key)}:</span></span>
+        <span class="hint">${escapeHtml(def.hint)}</span>
+      `,
     }));
     renderSuggestions();
   }
@@ -269,14 +311,26 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
   function showValueSuggestion(token) {
     const def = FIELD_BY_KEY.get(token.fieldKey);
     if (!token.value) {
-      currentSuggestions = [{ apply: null, html: `<span class="field-name">${escapeHtml(def.label)}:</span><span class="hint">${escapeHtml(def.hint)}</span>` }];
+      currentSuggestions = [
+        {
+          apply: null,
+          html: `
+            <span class="query-chip query-chip-preview" data-field="${token.fieldKey}"><span class="field-name">${escapeHtml(def.label)}:</span></span>
+            <span class="hint">${escapeHtml(def.hint)}</span>
+          `,
+        },
+      ];
     } else {
       currentSuggestions = [
         {
-          apply: () => {
-            commitToken(token);
-          },
-          html: `<span>Add filter — <span class="field-name">${escapeHtml(def.label)}</span>: “${escapeHtml(token.value)}”</span><span class="hint">Enter</span>`,
+          apply: (sourceEl) => commitToken(token, sourceEl),
+          html: `
+            <span class="query-chip query-chip-preview" data-field="${token.fieldKey}">
+              <span class="field-name">${escapeHtml(def.label)}:</span>
+              <span>${escapeHtml(token.value)}</span>
+            </span>
+            <span class="hint">Enter ↵</span>
+          `,
         },
       ];
     }
@@ -297,7 +351,8 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
       el.addEventListener('mousedown', (event) => {
         event.preventDefault();
         const index = Number(el.dataset.index);
-        currentSuggestions[index]?.apply?.();
+        const previewEl = el.querySelector('.query-chip-preview');
+        currentSuggestions[index]?.apply?.(previewEl);
       });
     });
   }
@@ -335,7 +390,8 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
       const token = getTrailingToken();
       if (token && token.value) {
         event.preventDefault();
-        commitToken(token);
+        const previewEl = suggestionsEl.querySelector('.query-chip-preview');
+        commitToken(token, previewEl);
         formEl.dispatchEvent(new CustomEvent('querybuilder:submit'));
       }
     }
