@@ -20,12 +20,12 @@ let currentResults = [];
 
 // Structured search fields exposed by the "documents" index, selectable via "field:value" in the search bar.
 const FIELD_DEFS = [
-  { key: 'person', label: 'Person', hint: 'Find persons mentioned in the text', kind: 'nested', type: 'Person' },
-  { key: 'place', label: 'Place', hint: 'Find places mentioned in the text', kind: 'nested', type: 'Place', aliases: ['location'] },
-  { key: 'profession', label: 'Profession', hint: 'Find by profession', kind: 'text', field: 'professionLabelPaths' },
+  { key: 'person', label: 'Person', hint: 'Find persons mentioned in the text, e.g. am*', kind: 'nested', type: 'Person' },
+  { key: 'place', label: 'Place', hint: 'Find places mentioned in the text, e.g. am*', kind: 'nested', type: 'Place', aliases: ['location'] },
+  { key: 'profession', label: 'Profession', hint: 'Find by profession, e.g. koop*', kind: 'text', field: 'professionLabelPaths' },
   { key: 'documenttype', label: 'Document type', hint: 'Find by document type, e.g. brief', kind: 'text', field: 'documentTypeLabelPaths', aliases: ['type', 'doctype'] },
-  { key: 'settlement', label: 'Settlement', hint: 'Find by settlement', kind: 'keyword', field: 'settlement' },
-  { key: 'inventory', label: 'Inventory number', hint: 'Find by exact inventory number', kind: 'keyword', field: 'inventoryNumber', exact: true, aliases: ['inv', 'invnr'] },
+  { key: 'settlement', label: 'Settlement', hint: 'Find by settlement, e.g. bat*', kind: 'keyword', field: 'settlement' },
+  { key: 'inventory', label: 'Inventory number', hint: 'Find by exact inventory number, or e.g. 11*', kind: 'keyword', field: 'inventoryNumber', exact: true, aliases: ['inv', 'invnr'] },
   { key: 'year', label: 'Year', hint: 'e.g. 1685 or 1680-1690', kind: 'year', aliases: ['date'] },
 ];
 
@@ -90,6 +90,16 @@ function escapeWildcardValue(value) {
   return String(value).replace(/([\\*?])/g, '\\$1');
 }
 
+// A value containing an explicit `*`/`?` is treated as a literal Elasticsearch wildcard
+// pattern (e.g. "am*"), otherwise it's escaped and wrapped as a "*value*" substring match.
+function hasExplicitWildcard(value) {
+  return /[*?]/.test(value);
+}
+
+function toWildcardPattern(value) {
+  return hasExplicitWildcard(value) ? value : `*${escapeWildcardValue(value)}*`;
+}
+
 // Turns a chip (field:value) into an Elasticsearch query clause against the "documents" index.
 function chipToEsClause(chip) {
   const def = FIELD_BY_KEY.get(chip.fieldKey);
@@ -107,7 +117,7 @@ function chipToEsClause(chip) {
               {
                 wildcard: {
                   'observances.label': {
-                    value: `*${escapeWildcardValue(value)}*`,
+                    value: toWildcardPattern(value),
                     case_insensitive: true,
                   },
                 },
@@ -120,13 +130,15 @@ function chipToEsClause(chip) {
   }
 
   if (def.kind === 'text') {
-    return { match: { [def.field]: value } };
+    return hasExplicitWildcard(value)
+      ? { wildcard: { [def.field]: { value, case_insensitive: true } } }
+      : { match: { [def.field]: value } };
   }
 
   if (def.kind === 'keyword') {
-    return def.exact
+    return def.exact && !hasExplicitWildcard(value)
       ? { term: { [def.field]: value } }
-      : { wildcard: { [def.field]: { value: `*${escapeWildcardValue(value)}*`, case_insensitive: true } } };
+      : { wildcard: { [def.field]: { value: toWildcardPattern(value), case_insensitive: true } } };
   }
 
   if (def.kind === 'year') {
@@ -342,7 +354,7 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
           <span class="field-name">${escapeHtml(def.label)}:</span>
           <span>${escapeHtml(token.value)}</span>
         </span>
-        <span class="hint">Enter ↵</span>
+        <span class="hint">${hasExplicitWildcard(token.value) ? 'Wildcard search ↵' : 'Enter ↵'}</span>
       `,
     };
   }
@@ -359,7 +371,7 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
   // Debounced lookup of matching indexed values (e.g. "place:Am" -> "Amsterdam") from the /suggest endpoint.
   function fetchValueSuggestions(token, def) {
     const prefix = token.value.trim();
-    if (def.kind === 'year' || prefix.length < SUGGEST_MIN_CHARS) return;
+    if (def.kind === 'year' || prefix.length < SUGGEST_MIN_CHARS || hasExplicitWildcard(prefix)) return;
 
     const requestId = suggestRequestId;
     suggestDebounceTimer = window.setTimeout(async () => {
