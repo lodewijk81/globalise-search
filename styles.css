@@ -358,6 +358,8 @@ a {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
 }
 
 .query-suggestions[hidden] {
@@ -378,6 +380,11 @@ a {
 
 .query-suggestion:hover {
   background: rgba(255, 255, 255, 0.08);
+}
+
+.query-suggestion.is-selected {
+  background: rgba(41, 191, 204, 0.16);
+  box-shadow: inset 3px 0 0 var(--brand-turquoise);
 }
 
 .query-suggestion.is-static {

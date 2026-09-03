@@ -1,4 +1,7 @@
 const API_URL = 'http://localhost:5050/search';
+const SUGGEST_URL = 'http://localhost:5050/suggest';
+const SUGGEST_MIN_CHARS = 2;
+const SUGGEST_DEBOUNCE_MS = 250;
 
 const pageType = document.body.dataset.page || 'landing';
 const landingForm = document.querySelector('#landing-search-form');
@@ -190,6 +193,10 @@ function describeChips(chips) {
 function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
   let chips = [];
   let currentSuggestions = [];
+  let selectedIndex = -1;
+  let suggestRequestId = 0;
+  let suggestDebounceTimer = null;
+  let suggestAbortController = null;
 
   function renderChips() {
     chipsEl.innerHTML = chips
@@ -279,13 +286,23 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
     return true;
   }
 
+  function cancelPendingSuggestFetch() {
+    window.clearTimeout(suggestDebounceTimer);
+    if (suggestAbortController) suggestAbortController.abort();
+    suggestRequestId += 1;
+  }
+
   function hideSuggestions() {
+    cancelPendingSuggestFetch();
     currentSuggestions = [];
+    selectedIndex = -1;
     suggestionsEl.hidden = true;
     suggestionsEl.innerHTML = '';
   }
 
   function showFieldSuggestions(word, start) {
+    cancelPendingSuggestFetch();
+    selectedIndex = -1;
     const lowerWord = word.toLowerCase();
     const matches = FIELD_DEFS.filter((def) => def.key.startsWith(lowerWord));
     if (!word || !matches.length) {
@@ -308,33 +325,97 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
     renderSuggestions();
   }
 
+  function buildTypedValueSuggestion(token, def) {
+    if (!token.value) {
+      return {
+        apply: null,
+        html: `
+          <span class="query-chip query-chip-preview" data-field="${token.fieldKey}"><span class="field-name">${escapeHtml(def.label)}:</span></span>
+          <span class="hint">${escapeHtml(def.hint)}</span>
+        `,
+      };
+    }
+    return {
+      apply: (sourceEl) => commitToken(token, sourceEl),
+      html: `
+        <span class="query-chip query-chip-preview" data-field="${token.fieldKey}">
+          <span class="field-name">${escapeHtml(def.label)}:</span>
+          <span>${escapeHtml(token.value)}</span>
+        </span>
+        <span class="hint">Enter ↵</span>
+      `,
+    };
+  }
+
   function showValueSuggestion(token) {
     const def = FIELD_BY_KEY.get(token.fieldKey);
-    if (!token.value) {
-      currentSuggestions = [
-        {
-          apply: null,
-          html: `
-            <span class="query-chip query-chip-preview" data-field="${token.fieldKey}"><span class="field-name">${escapeHtml(def.label)}:</span></span>
-            <span class="hint">${escapeHtml(def.hint)}</span>
-          `,
-        },
-      ];
-    } else {
-      currentSuggestions = [
-        {
-          apply: (sourceEl) => commitToken(token, sourceEl),
-          html: `
-            <span class="query-chip query-chip-preview" data-field="${token.fieldKey}">
-              <span class="field-name">${escapeHtml(def.label)}:</span>
-              <span>${escapeHtml(token.value)}</span>
-            </span>
-            <span class="hint">Enter ↵</span>
-          `,
-        },
-      ];
-    }
+    cancelPendingSuggestFetch();
+    selectedIndex = -1;
+    currentSuggestions = [buildTypedValueSuggestion(token, def)];
     renderSuggestions();
+    fetchValueSuggestions(token, def);
+  }
+
+  // Debounced lookup of matching indexed values (e.g. "place:Am" -> "Amsterdam") from the /suggest endpoint.
+  function fetchValueSuggestions(token, def) {
+    const prefix = token.value.trim();
+    if (def.kind === 'year' || prefix.length < SUGGEST_MIN_CHARS) return;
+
+    const requestId = suggestRequestId;
+    suggestDebounceTimer = window.setTimeout(async () => {
+      const controller = new AbortController();
+      suggestAbortController = controller;
+      try {
+        const response = await fetch(SUGGEST_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ field: token.fieldKey, prefix }),
+          signal: controller.signal,
+        });
+        if (!response.ok || requestId !== suggestRequestId) return;
+        const data = await response.json();
+        if (requestId !== suggestRequestId) return;
+
+        const valueItems = (data.suggestions || [])
+          .filter((item) => item.value.toLowerCase() !== prefix.toLowerCase())
+          .map((item) => ({
+            apply: (sourceEl) => commitToken({ ...token, value: item.value }, sourceEl),
+            html: `
+              <span class="query-chip query-chip-preview" data-field="${token.fieldKey}">
+                <span class="field-name">${escapeHtml(def.label)}:</span>
+                <span>${escapeHtml(item.value)}</span>
+              </span>
+              <span class="hint">${item.count == null ? 'Suggested' : `${item.count} result${item.count === 1 ? '' : 's'}`}</span>
+            `,
+          }));
+
+        currentSuggestions = [currentSuggestions[0], ...valueItems];
+        renderSuggestions();
+      } catch (error) {
+        if (error.name !== 'AbortError') console.error(error);
+      }
+    }, SUGGEST_DEBOUNCE_MS);
+  }
+
+  function selectableIndexes() {
+    return currentSuggestions.map((item, index) => (item.apply ? index : -1)).filter((index) => index !== -1);
+  }
+
+  function updateSelectedHighlight() {
+    suggestionsEl.querySelectorAll('.query-suggestion').forEach((el) => {
+      const isSelected = Number(el.dataset.index) === selectedIndex;
+      el.classList.toggle('is-selected', isSelected);
+      if (isSelected) el.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  function moveSelection(step) {
+    const selectable = selectableIndexes();
+    if (!selectable.length) return;
+    const currentPos = selectable.indexOf(selectedIndex);
+    const nextPos = currentPos === -1 ? (step > 0 ? 0 : selectable.length - 1) : (currentPos + step + selectable.length) % selectable.length;
+    selectedIndex = selectable[nextPos];
+    updateSelectedHighlight();
   }
 
   function renderSuggestions() {
@@ -344,7 +425,10 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
     }
     suggestionsEl.hidden = false;
     suggestionsEl.innerHTML = currentSuggestions
-      .map((item, index) => `<div class="query-suggestion${item.apply ? '' : ' is-static'}" data-index="${index}">${item.html}</div>`)
+      .map(
+        (item, index) =>
+          `<div class="query-suggestion${item.apply ? '' : ' is-static'}${index === selectedIndex ? ' is-selected' : ''}" data-index="${index}">${item.html}</div>`
+      )
       .join('');
 
     suggestionsEl.querySelectorAll('.query-suggestion').forEach((el) => {
@@ -353,6 +437,13 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
         const index = Number(el.dataset.index);
         const previewEl = el.querySelector('.query-chip-preview');
         currentSuggestions[index]?.apply?.(previewEl);
+      });
+      el.addEventListener('mousemove', () => {
+        const index = Number(el.dataset.index);
+        if (currentSuggestions[index]?.apply && index !== selectedIndex) {
+          selectedIndex = index;
+          updateSelectedHighlight();
+        }
       });
     });
   }
@@ -381,6 +472,16 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
       hideSuggestions();
       return;
     }
+    if (event.key === 'ArrowDown' && currentSuggestions.length) {
+      event.preventDefault();
+      moveSelection(1);
+      return;
+    }
+    if (event.key === 'ArrowUp' && currentSuggestions.length) {
+      event.preventDefault();
+      moveSelection(-1);
+      return;
+    }
     if (event.key === 'Tab' && currentSuggestions.length === 1 && currentSuggestions[0].apply && getTrailingWord()) {
       event.preventDefault();
       currentSuggestions[0].apply();
@@ -395,6 +496,12 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
       return;
     }
     if (event.key === 'Enter') {
+      if (selectedIndex !== -1 && currentSuggestions[selectedIndex]?.apply) {
+        event.preventDefault();
+        const el = suggestionsEl.querySelector(`.query-suggestion[data-index="${selectedIndex}"] .query-chip-preview`);
+        currentSuggestions[selectedIndex].apply(el);
+        return;
+      }
       const token = getTrailingToken();
       if (token && token.value) {
         event.preventDefault();
