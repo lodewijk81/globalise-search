@@ -33,14 +33,14 @@ python3 -m pip install flask requests
 Then open two terminals. In the first terminal, start the proxy:
 
 ```bash
-cd /Users/lodewijkpetram/Documents/GitHub/globalise-search/new-index
+cd /path/to/globalise-search/new-index
 python3 proxy.py
 ```
 
 In the second terminal, start the local search UI:
 
 ```bash
-cd /Users/lodewijkpetram/Documents/GitHub/globalise-search/new-index
+cd /path/to/globalise-search/new-index
 python3 -m http.server 8000
 ```
 
