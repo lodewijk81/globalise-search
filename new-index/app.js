@@ -173,25 +173,165 @@ function buildYearRangeClause(value) {
 }
 
 function buildEsQuery(keywordText, chips) {
-  const must = [];
-  if (keywordText) {
-    must.push({
-      query_string: {
-        query: keywordText,
-        default_field: 'text',
-        default_operator: 'AND',
-      },
-    });
-  }
-
+  const expressionClause = parseKeywordExpression(keywordText);
   const filter = chips.map(chipToEsClause).filter(Boolean);
 
   return {
     bool: {
-      ...(must.length ? { must } : {}),
+      ...(expressionClause ? { must: [expressionClause] } : {}),
       ...(filter.length ? { filter } : {}),
     },
   };
+}
+
+// --- Boolean query expression parser -----------------------------------------------------
+// Lets the keyword box accept things like `(place:Amsterdam OR place:Deventer) AND profession:timmerman`,
+// mixing structured field filters with free text, AND/OR/NOT, and parentheses for grouping.
+
+// Splits a raw expression string into LPAREN/RPAREN/AND/OR/NOT/FIELDVALUE/WORD tokens.
+function tokenizeQueryExpression(input) {
+  const tokens = [];
+  let i = 0;
+  const n = input.length;
+
+  while (i < n) {
+    const ch = input[i];
+
+    if (/\s/.test(ch)) {
+      i += 1;
+      continue;
+    }
+    if (ch === '(') {
+      tokens.push({ type: 'LPAREN' });
+      i += 1;
+      continue;
+    }
+    if (ch === ')') {
+      tokens.push({ type: 'RPAREN' });
+      i += 1;
+      continue;
+    }
+    if (ch === '"') {
+      const end = input.indexOf('"', i + 1);
+      const raw = end === -1 ? input.slice(i) : input.slice(i, end + 1);
+      tokens.push({ type: 'WORD', text: raw });
+      i = end === -1 ? n : end + 1;
+      continue;
+    }
+
+    const fieldMatch = /^([A-Za-z]+)\s*:\s*/.exec(input.slice(i));
+    const fieldKey = fieldMatch ? FIELD_ALIASES.get(fieldMatch[1].toLowerCase()) : null;
+    if (fieldMatch && fieldKey) {
+      let j = i + fieldMatch[0].length;
+      let fieldValue;
+      if (input[j] === '"') {
+        const end = input.indexOf('"', j + 1);
+        fieldValue = end === -1 ? input.slice(j + 1) : input.slice(j + 1, end);
+        j = end === -1 ? n : end + 1;
+      } else {
+        const valueMatch = /^[^\s()]*/.exec(input.slice(j));
+        fieldValue = valueMatch ? valueMatch[0] : '';
+        j += fieldValue.length;
+      }
+      tokens.push({ type: 'FIELDVALUE', fieldKey, value: fieldValue });
+      i = j;
+      continue;
+    }
+
+    const keywordMatch = /^(AND|OR|NOT)(?![A-Za-z0-9_])/i.exec(input.slice(i));
+    if (keywordMatch) {
+      tokens.push({ type: keywordMatch[1].toUpperCase() });
+      i += keywordMatch[0].length;
+      continue;
+    }
+
+    const wordMatch = /^[^\s()]+/.exec(input.slice(i));
+    tokens.push({ type: 'WORD', text: wordMatch[0] });
+    i += wordMatch[0].length;
+  }
+
+  return tokens;
+}
+
+// Recursive-descent parser: orExpr := andExpr (OR andExpr)*, andExpr := notExpr (AND? notExpr)*.
+function parseQueryTokens(tokens) {
+  let pos = 0;
+  const peek = () => tokens[pos];
+  const consume = () => tokens[pos++];
+
+  function parseWordRun() {
+    const words = [];
+    while (peek()?.type === 'WORD') words.push(consume().text);
+    const text = words.join(' ');
+    return text ? { query_string: { query: text, default_field: 'text', default_operator: 'AND' } } : null;
+  }
+
+  function parsePrimary() {
+    const token = peek();
+    if (!token) return null;
+    if (token.type === 'LPAREN') {
+      consume();
+      const inner = parseOr();
+      if (peek()?.type === 'RPAREN') consume();
+      return inner;
+    }
+    if (token.type === 'FIELDVALUE') {
+      consume();
+      return chipToEsClause({ fieldKey: token.fieldKey, value: token.value });
+    }
+    if (token.type === 'WORD') {
+      return parseWordRun();
+    }
+    // Stray token (e.g. an unmatched ")"): skip it so parsing can continue.
+    consume();
+    return null;
+  }
+
+  function parseNot() {
+    if (peek()?.type === 'NOT') {
+      consume();
+      const clause = parsePrimary();
+      return clause ? { bool: { must_not: [clause] } } : null;
+    }
+    return parsePrimary();
+  }
+
+  function parseAnd() {
+    const clauses = [parseNot()].filter(Boolean);
+    while (peek() && peek().type !== 'OR' && peek().type !== 'RPAREN') {
+      if (peek().type === 'AND') consume();
+      const clause = parseNot();
+      if (clause) clauses.push(clause);
+    }
+    if (!clauses.length) return null;
+    return clauses.length === 1 ? clauses[0] : { bool: { must: clauses } };
+  }
+
+  function parseOr() {
+    const clauses = [parseAnd()].filter(Boolean);
+    while (peek()?.type === 'OR') {
+      consume();
+      const clause = parseAnd();
+      if (clause) clauses.push(clause);
+    }
+    if (!clauses.length) return null;
+    return clauses.length === 1 ? clauses[0] : { bool: { should: clauses, minimum_should_match: 1 } };
+  }
+
+  return parseOr();
+}
+
+// Parses the whole keyword box into an ES query clause, supporting `field:value`, AND/OR/NOT and parentheses.
+function parseKeywordExpression(keywordText) {
+  const trimmed = (keywordText || '').trim();
+  if (!trimmed) return null;
+  try {
+    const tokens = tokenizeQueryExpression(trimmed);
+    return tokens.length ? parseQueryTokens(tokens) : null;
+  } catch (error) {
+    console.error('Failed to parse query expression, falling back to plain text search', error);
+    return { query_string: { query: trimmed, default_field: 'text', default_operator: 'AND' } };
+  }
 }
 
 function describeChips(chips) {
@@ -273,19 +413,29 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
 
   function getTrailingToken() {
     const value = inputEl.value;
-    const match = value.match(/(^|\s)([a-zA-Z]+)\s*:\s*("([^"]*)"|(\S*))$/);
+    const match = value.match(/(^|[\s(])([a-zA-Z]+)\s*:\s*("([^"]*)"|([^\s()]*))$/);
     if (!match) return null;
     const fieldKey = FIELD_ALIASES.get(match[2].toLowerCase());
     if (!fieldKey) return null;
     const tokenValue = match[4] !== undefined ? match[4] : match[5] || '';
-    return { fieldKey, value: tokenValue, start: match.index + match[1].length, end: value.length };
+    const start = match.index + match[1].length;
+    const valueStart = value.length - (match[3] ? match[3].length : match[5].length);
+    return { fieldKey, value: tokenValue, start, end: value.length, valueStart };
   }
 
   function getTrailingWord() {
     const value = inputEl.value;
-    const match = value.match(/(^|\s)([a-zA-Z]+)$/);
+    const match = value.match(/(^|[\s(])([a-zA-Z]+)$/);
     if (!match) return null;
     return { word: match[2], start: match.index + match[1].length, end: value.length };
+  }
+
+  // True when the trailing "field:value" token is the entire (trimmed) input, i.e. not
+  // part of a larger boolean expression — this is what makes it eligible to become a chip.
+  function isSoleToken(token) {
+    const before = inputEl.value.slice(0, token.start);
+    const after = inputEl.value.slice(token.end);
+    return before.trim() === '' && after.trim() === '';
   }
 
   function commitToken(token, sourceEl) {
@@ -297,6 +447,27 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
     hideSuggestions();
     return true;
   }
+
+  // Replaces just the value portion of a trailing "field:value" token in place, without
+  // turning it into a chip — used when the token is part of a larger typed expression.
+  function insertTokenValue(token, value) {
+    const formatted = /\s/.test(value) ? `"${value}"` : value;
+    inputEl.value = `${inputEl.value.slice(0, token.valueStart)}${formatted}${inputEl.value.slice(token.end)}`;
+    const cursor = token.valueStart + formatted.length;
+    inputEl.focus();
+    inputEl.setSelectionRange(cursor, cursor);
+    hideSuggestions();
+    return true;
+  }
+
+  // Applies a chosen value to the trailing token: as a chip when it's the sole input
+  // content, or as an in-place replacement when it's part of a bigger expression.
+  function applyTokenValue(token, sourceEl, value) {
+    const finalToken = value === undefined ? token : { ...token, value };
+    if (!finalToken.value) return false;
+    return isSoleToken(token) ? commitToken(finalToken, sourceEl) : insertTokenValue(token, finalToken.value);
+  }
+
 
   function cancelPendingSuggestFetch() {
     window.clearTimeout(suggestDebounceTimer);
@@ -348,7 +519,7 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
       };
     }
     return {
-      apply: (sourceEl) => commitToken(token, sourceEl),
+      apply: (sourceEl) => applyTokenValue(token, sourceEl),
       html: `
         <span class="query-chip query-chip-preview" data-field="${token.fieldKey}">
           <span class="field-name">${escapeHtml(def.label)}:</span>
@@ -391,7 +562,7 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
         const valueItems = (data.suggestions || [])
           .filter((item) => item.value.toLowerCase() !== prefix.toLowerCase())
           .map((item) => ({
-            apply: (sourceEl) => commitToken({ ...token, value: item.value }, sourceEl),
+            apply: (sourceEl) => applyTokenValue(token, sourceEl, item.value),
             html: `
               <span class="query-chip query-chip-preview" data-field="${token.fieldKey}">
                 <span class="field-name">${escapeHtml(def.label)}:</span>
@@ -515,11 +686,16 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
         return;
       }
       const token = getTrailingToken();
-      if (token && token.value) {
+      // Only intercept Enter to auto-chip a "field:value" token when it's the sole input;
+      // inside a larger boolean expression, Enter should submit the form as usual so the
+      // whole expression (parentheses, AND/OR/NOT) is parsed and searched.
+      if (token && token.value && isSoleToken(token)) {
         event.preventDefault();
         const previewEl = suggestionsEl.querySelector('.query-chip-preview');
         commitToken(token, previewEl);
+        return;
       }
+      hideSuggestions();
     }
   });
 
