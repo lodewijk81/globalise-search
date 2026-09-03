@@ -1,4 +1,4 @@
-const API_URL = 'https://index.globalise.huygens.knaw.nl/documents/_search';
+const API_URL = 'http://localhost:5050/search';
 
 const pageType = document.body.dataset.page || 'landing';
 const landingForm = document.querySelector('#landing-search-form');
