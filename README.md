@@ -19,18 +19,40 @@ It is intentionally a temporary prototype and not the final production experienc
 
 ## Local development
 
-Open the project in a static web server, for example:
+The search UI and its proxy both need to run locally. The proxy forwards search
+requests to the Elasticsearch backend, which is only reachable from the HuC
+domain. Before starting either process, connect to the HuC network through the
+VPN or work from one of the participating institutes.
+
+Install the proxy dependencies if needed:
 
 ```bash
-cd /Users/lodewijkpetram/Documents/GitHub/globalise-search
+python3 -m pip install flask requests
+```
+
+Then open two terminals. In the first terminal, start the proxy:
+
+```bash
+cd /Users/lodewijkpetram/Documents/GitHub/globalise-search/new-index
+python3 proxy.py
+```
+
+In the second terminal, start the local search UI:
+
+```bash
+cd /Users/lodewijkpetram/Documents/GitHub/globalise-search/new-index
 python3 -m http.server 8000
 ```
 
 Then visit:
 
 ```text
-http://localhost:8000/
+http://localhost:8000/index.html
 ```
+
+Keep both terminals running while using the search interface. The proxy listens
+on `http://localhost:5050` and the local search UI listens on
+`http://localhost:8000`.
 
 ## Deployment
 
