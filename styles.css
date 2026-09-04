@@ -328,6 +328,48 @@ a {
   z-index: 90;
 }
 
+.query-preview {
+  flex: 1 1 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.14);
+}
+
+.query-preview[hidden] {
+  display: none;
+}
+
+.query-chip.is-inline {
+  cursor: default;
+  opacity: 0.92;
+}
+
+.query-connector {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  padding: 0 2px;
+}
+
+.query-connector.is-paren {
+  font-weight: 400;
+  text-transform: none;
+  font-size: 1rem;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.query-freetext {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
 .query-builder input {
   flex: 1 1 140px;
   min-width: 140px;

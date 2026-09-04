@@ -342,13 +342,56 @@ function describeChips(chips) {
 
 // Interactive "field:value" chip input: lets keyword search be combined with
 // structured filters such as person:, place:, profession:, settlement:, inventory: and year:.
-function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
+function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl, previewEl }) {
   let chips = [];
   let currentSuggestions = [];
   let selectedIndex = -1;
   let suggestRequestId = 0;
   let suggestDebounceTimer = null;
   let suggestAbortController = null;
+
+  // Renders a read-only preview of how the raw text is understood: structured field:value
+  // terms become chips, boolean keywords/parentheses become connectors, the rest stays as
+  // plain free text. Only shown once the input contains actual boolean/structured syntax.
+  function renderExpressionPreview() {
+    if (!previewEl) return;
+    let tokens = [];
+    try {
+      tokens = tokenizeQueryExpression(inputEl.value);
+    } catch (error) {
+      tokens = [];
+    }
+
+    const hasStructure = tokens.some((token) => token.type !== 'WORD');
+    if (!hasStructure) {
+      previewEl.hidden = true;
+      previewEl.innerHTML = '';
+      return;
+    }
+
+    previewEl.hidden = false;
+    previewEl.innerHTML = tokens
+      .map((token) => {
+        if (token.type === 'FIELDVALUE') {
+          const def = FIELD_BY_KEY.get(token.fieldKey);
+          if (!def || !token.value) return '';
+          return `
+            <span class="query-chip is-inline" data-field="${token.fieldKey}">
+              <span class="field-name">${escapeHtml(def.label)}:</span>
+              <span>${escapeHtml(token.value)}</span>
+            </span>
+          `;
+        }
+        if (token.type === 'AND' || token.type === 'OR' || token.type === 'NOT') {
+          return `<span class="query-connector">${token.type}</span>`;
+        }
+        if (token.type === 'LPAREN') return '<span class="query-connector is-paren">(</span>';
+        if (token.type === 'RPAREN') return '<span class="query-connector is-paren">)</span>';
+        if (token.type === 'WORD') return `<span class="query-freetext">${escapeHtml(token.text)}</span>`;
+        return '';
+      })
+      .join('');
+  }
 
   function renderChips() {
     chipsEl.innerHTML = chips
@@ -443,6 +486,7 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
     chips.push({ fieldKey: token.fieldKey, value: token.value });
     inputEl.value = `${inputEl.value.slice(0, token.start)}${inputEl.value.slice(token.end)}`.replace(/\s+$/, '');
     renderChips();
+    renderExpressionPreview();
     if (sourceEl) animateChipFlight(sourceEl, chips.length - 1);
     hideSuggestions();
     return true;
@@ -456,6 +500,7 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
     const cursor = token.valueStart + formatted.length;
     inputEl.focus();
     inputEl.setSelectionRange(cursor, cursor);
+    renderExpressionPreview();
     hideSuggestions();
     return true;
   }
@@ -632,6 +677,7 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
   }
 
   function updateSuggestions() {
+    renderExpressionPreview();
     const token = getTrailingToken();
     if (token) {
       showValueSuggestion(token);
@@ -708,6 +754,7 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl }) {
     getKeywordText: () => inputEl.value.trim(),
     setKeywordText: (value) => {
       inputEl.value = value;
+      renderExpressionPreview();
     },
   };
 }
@@ -781,10 +828,16 @@ async function getThumbnailUrl(result) {
   }
 }
 
-function getHighlightText(hit) {
-  const fragments = hit?.highlight?.text ?? [];
-  const snippet = fragments.join(' … ');
-  return snippet || 'No snippet available.';
+function getHighlightText(result) {
+  const fragments = result?.highlight?.text ?? [];
+  if (fragments.length) return fragments.join(' … ');
+
+  // Structural-only searches (person:/place:/etc.) don't match anything in the "text" field,
+  // so Elasticsearch has nothing to highlight. Fall back to a plain excerpt of the document text.
+  const fullText = (result?.text || '').replace(/\s+/g, ' ').trim();
+  if (!fullText) return 'No snippet available.';
+  const excerpt = fullText.length > 300 ? `${fullText.slice(0, 300)}…` : fullText;
+  return escapeHtml(excerpt);
 }
 
 function sortResults(results, sortKey) {
@@ -926,7 +979,7 @@ async function renderResults(results, totalHits, page, query, chips, sortKey) {
     results.map(async (result) => {
       const documentId = result.name || 'Unknown document';
       const viewerUrl = buildViewerUrl(result);
-      const snippet = getHighlightText({ highlight: result.highlight });
+      const snippet = getHighlightText(result);
       const invNr = result.inventoryNumber || 'Unknown inventory';
       const settlement = result.settlement || 'Unknown';
       const year = getYearValue(result);
@@ -1000,6 +1053,7 @@ function initLandingPage() {
     chipsEl: document.querySelector('#landing-query-chips'),
     inputEl: document.querySelector('#landing-search-input'),
     suggestionsEl: document.querySelector('#landing-query-suggestions'),
+    previewEl: document.querySelector('#landing-query-preview'),
   });
 
   const goToResults = () => {
@@ -1030,6 +1084,7 @@ function initResultsPage() {
     chipsEl: document.querySelector('#results-query-chips'),
     inputEl: document.querySelector('#results-search-input'),
     suggestionsEl: document.querySelector('#results-query-suggestions'),
+    previewEl: document.querySelector('#results-query-preview'),
   });
   queryBuilder.setKeywordText(q);
   queryBuilder.setChips(decodeChips(filters));
