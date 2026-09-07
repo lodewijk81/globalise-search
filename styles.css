@@ -370,6 +370,27 @@ a {
   font-style: italic;
 }
 
+.query-proxgroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px;
+  border: 1px dashed rgba(255, 255, 255, 0.3);
+  border-radius: 10px;
+}
+
+.proximity-slop {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.78rem;
+  font-weight: 700;
+  padding-left: 2px;
+}
+
+.fuzzy-marker {
+  color: rgba(255, 255, 255, 0.7);
+  font-weight: 700;
+}
+
 .query-builder input {
   flex: 1 1 140px;
   min-width: 140px;

@@ -172,23 +172,96 @@ function buildYearRangeClause(value) {
   };
 }
 
+// Returns { query, proximityGroups }: proximityGroups lists any (structural + free-text)
+// proximity groups that need backend refinement, see buildProximityClause below.
 function buildEsQuery(keywordText, chips) {
-  const expressionClause = parseKeywordExpression(keywordText);
+  const proximityGroups = [];
+  const expressionClause = parseKeywordExpression(keywordText, proximityGroups);
   const filter = chips.map(chipToEsClause).filter(Boolean);
 
-  return {
+  const query = {
     bool: {
       ...(expressionClause ? { must: [expressionClause] } : {}),
       ...(filter.length ? { filter } : {}),
     },
   };
+  return { query, proximityGroups };
 }
 
 // --- Boolean query expression parser -----------------------------------------------------
 // Lets the keyword box accept things like `(place:Amsterdam OR place:Deventer) AND profession:timmerman`,
 // mixing structured field filters with free text, AND/OR/NOT, and parentheses for grouping.
+// It also accepts proximity groups like `(amsterdam timmerman)~5`: a parenthesised group
+// immediately followed by `~N` becomes a single PROXGROUP token instead of LPAREN/.../RPAREN.
+// Words inside a proximity group may end in `~` or `~N` to request a fuzzy match, e.g. `(amsterdam~ timmerman)~5`.
 
-// Splits a raw expression string into LPAREN/RPAREN/AND/OR/NOT/FIELDVALUE/WORD tokens.
+// Finds the index of the ")" balancing the "(" at startIndex, skipping quoted content, or -1.
+function findMatchingParen(input, startIndex) {
+  let depth = 0;
+  for (let i = startIndex; i < input.length; i += 1) {
+    const ch = input[i];
+    if (ch === '"') {
+      const end = input.indexOf('"', i + 1);
+      i = end === -1 ? input.length : end;
+      continue;
+    }
+    if (ch === '(') depth += 1;
+    else if (ch === ')') {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+// Splits the inside of a "(...)~N" proximity group into { kind: 'field' } or { kind: 'word' } items.
+function tokenizeProximityItems(input) {
+  const items = [];
+  let i = 0;
+  const n = input.length;
+
+  while (i < n) {
+    if (/\s/.test(input[i])) {
+      i += 1;
+      continue;
+    }
+
+    const fieldMatch = /^([A-Za-z]+)\s*:\s*/.exec(input.slice(i));
+    const fieldKey = fieldMatch ? FIELD_ALIASES.get(fieldMatch[1].toLowerCase()) : null;
+    if (fieldMatch && fieldKey) {
+      let j = i + fieldMatch[0].length;
+      let value;
+      if (input[j] === '"') {
+        const end = input.indexOf('"', j + 1);
+        value = end === -1 ? input.slice(j + 1) : input.slice(j + 1, end);
+        j = end === -1 ? n : end + 1;
+      } else {
+        const valueMatch = /^[^\s()]*/.exec(input.slice(j));
+        value = valueMatch ? valueMatch[0] : '';
+        j += value.length;
+      }
+      items.push({ kind: 'field', fieldKey, value });
+      i = j;
+      continue;
+    }
+
+    const wordMatch = /^[^\s()]+/.exec(input.slice(i));
+    if (!wordMatch) {
+      i += 1;
+      continue;
+    }
+    const raw = wordMatch[0];
+    i += raw.length;
+    const fuzzyMatch = /^(.+?)~(\d*)$/.exec(raw);
+    items.push(
+      fuzzyMatch ? { kind: 'word', text: fuzzyMatch[1], fuzzy: fuzzyMatch[2] || 'AUTO' } : { kind: 'word', text: raw, fuzzy: null }
+    );
+  }
+
+  return items;
+}
+
+// Splits a raw expression string into LPAREN/RPAREN/AND/OR/NOT/FIELDVALUE/WORD/PROXGROUP tokens.
 function tokenizeQueryExpression(input) {
   const tokens = [];
   let i = 0;
@@ -202,6 +275,16 @@ function tokenizeQueryExpression(input) {
       continue;
     }
     if (ch === '(') {
+      const closeIndex = findMatchingParen(input, i);
+      if (closeIndex !== -1) {
+        const slopMatch = /^~(\d+)/.exec(input.slice(closeIndex + 1));
+        if (slopMatch) {
+          const items = tokenizeProximityItems(input.slice(i + 1, closeIndex));
+          tokens.push({ type: 'PROXGROUP', slop: Number(slopMatch[1]), items });
+          i = closeIndex + 1 + slopMatch[0].length;
+          continue;
+        }
+      }
       tokens.push({ type: 'LPAREN' });
       i += 1;
       continue;
@@ -253,8 +336,53 @@ function tokenizeQueryExpression(input) {
   return tokens;
 }
 
+// Builds the ES clause for a PROXGROUP token. Plain-word-only groups become a native
+// span_near query. Groups mixing in a structural field:value can't be expressed as a single
+// span query (span clauses must all target the same field, but annotations live in a separate
+// nested field), so we emit a coarse match/filter clause here and record the group in
+// `collector` so the backend can refine it using the stored annotation offsets.
+function buildProximityClause(group, collector) {
+  const items = group.items.filter((item) => (item.kind === 'word' ? item.text : item.value));
+  if (items.length < 2) return null;
+  const hasField = items.some((item) => item.kind === 'field');
+
+  if (!hasField) {
+    const clauses = items.map((item) => {
+      const value = item.text.toLowerCase();
+      return item.fuzzy
+        ? { span_multi: { match: { fuzzy: { text: { value, fuzziness: item.fuzzy } } } } }
+        : { span_term: { text: value } };
+    });
+    return { span_near: { clauses, slop: group.slop, in_order: false } };
+  }
+
+  const mustClauses = items
+    .map((item) => {
+      if (item.kind === 'field') return chipToEsClause({ fieldKey: item.fieldKey, value: item.value });
+      return item.fuzzy
+        ? { fuzzy: { text: { value: item.text, fuzziness: item.fuzzy } } }
+        : { match: { text: item.text } };
+    })
+    .filter(Boolean);
+  if (!mustClauses.length) return null;
+
+  if (collector) {
+    collector.push({
+      slop: group.slop,
+      terms: items.map((item) =>
+        item.kind === 'field'
+          ? { type: 'field', fieldKey: item.fieldKey, value: item.value }
+          : { type: 'word', value: item.text, fuzzy: item.fuzzy }
+      ),
+    });
+  }
+
+  return { bool: { must: mustClauses } };
+}
+
 // Recursive-descent parser: orExpr := andExpr (OR andExpr)*, andExpr := notExpr (AND? notExpr)*.
-function parseQueryTokens(tokens) {
+// `collector` gathers proximity groups that mix structural terms with free text (see above).
+function parseQueryTokens(tokens, collector) {
   let pos = 0;
   const peek = () => tokens[pos];
   const consume = () => tokens[pos++];
@@ -274,6 +402,10 @@ function parseQueryTokens(tokens) {
       const inner = parseOr();
       if (peek()?.type === 'RPAREN') consume();
       return inner;
+    }
+    if (token.type === 'PROXGROUP') {
+      consume();
+      return buildProximityClause(token, collector);
     }
     if (token.type === 'FIELDVALUE') {
       consume();
@@ -321,13 +453,15 @@ function parseQueryTokens(tokens) {
   return parseOr();
 }
 
-// Parses the whole keyword box into an ES query clause, supporting `field:value`, AND/OR/NOT and parentheses.
-function parseKeywordExpression(keywordText) {
+// Parses the whole keyword box into an ES query clause, supporting `field:value`, AND/OR/NOT,
+// parentheses and `(...)~N` proximity groups. Proximity groups that mix a structural field:value
+// with free text are also pushed onto `collector` for backend-side proximity refinement.
+function parseKeywordExpression(keywordText, collector) {
   const trimmed = (keywordText || '').trim();
   if (!trimmed) return null;
   try {
     const tokens = tokenizeQueryExpression(trimmed);
-    return tokens.length ? parseQueryTokens(tokens) : null;
+    return tokens.length ? parseQueryTokens(tokens, collector) : null;
   } catch (error) {
     console.error('Failed to parse query expression, falling back to plain text search', error);
     return { query_string: { query: trimmed, default_field: 'text', default_operator: 'AND' } };
@@ -379,6 +513,28 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl, previewEl
             <span class="query-chip is-inline" data-field="${token.fieldKey}">
               <span class="field-name">${escapeHtml(def.label)}:</span>
               <span>${escapeHtml(token.value)}</span>
+            </span>
+          `;
+        }
+        if (token.type === 'PROXGROUP') {
+          const itemsHtml = token.items
+            .map((item, index) => {
+              const separator = index === 0 ? '' : '<span class="query-connector">near</span>';
+              if (item.kind === 'field') {
+                const def = FIELD_BY_KEY.get(item.fieldKey);
+                if (!def || !item.value) return separator;
+                return `${separator}<span class="query-chip is-inline" data-field="${item.fieldKey}">
+                  <span class="field-name">${escapeHtml(def.label)}:</span>
+                  <span>${escapeHtml(item.value)}</span>
+                </span>`;
+              }
+              const fuzzySuffix = item.fuzzy ? `<span class="fuzzy-marker">~${item.fuzzy === 'AUTO' ? '' : item.fuzzy}</span>` : '';
+              return `${separator}<span class="query-freetext">${escapeHtml(item.text)}${fuzzySuffix}</span>`;
+            })
+            .join('');
+          return `
+            <span class="query-proxgroup">
+              <span class="query-connector is-paren">(</span>${itemsHtml}<span class="query-connector is-paren">)</span><span class="proximity-slop">~${token.slop}</span>
             </span>
           `;
         }
@@ -897,10 +1053,11 @@ async function search(keywordText, chips, page, sortKey = 'relevance') {
   updateQueryState(trimmedQuery, activeChips, page, sortKey);
 
   const from = (page - 1) * pageSize;
+  const { query, proximityGroups } = buildEsQuery(trimmedQuery, activeChips);
   const payload = {
     from,
     size: pageSize,
-    query: buildEsQuery(trimmedQuery, activeChips),
+    query,
     highlight: {
       pre_tags: ['<mark>'],
       post_tags: ['</mark>'],
@@ -910,6 +1067,11 @@ async function search(keywordText, chips, page, sortKey = 'relevance') {
     },
     sort: ['_score'],
   };
+  // Structural+free-text proximity groups (e.g. (place:Amsterdam timmerman)~5) can't be
+  // expressed as a native ES query, so the proxy re-checks true word distance using this.
+  if (proximityGroups.length) {
+    payload.proximity = proximityGroups;
+  }
 
   if (statusContainer) {
     statusContainer.textContent = 'Searching…';
