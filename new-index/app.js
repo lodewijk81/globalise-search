@@ -926,8 +926,15 @@ function getInventoryNumber(result) {
   return result?.inventoryNumber || null;
 }
 
+// Documents can span a range of scans (e.g. "..._4059_0491-0492"); viewer links and
+// thumbnails should always point at the first scan in that range.
+function getFirstScanId(documentId) {
+  const match = /^(.+_)(\d+)-\d+$/.exec(documentId || '');
+  return match ? `${match[1]}${match[2]}` : documentId;
+}
+
 function buildViewerUrl(result) {
-  const documentId = result?.name;
+  const documentId = getFirstScanId(result?.name);
   const inventoryNumber = getInventoryNumber(result);
 
   if (!documentId || !inventoryNumber) {
@@ -945,7 +952,7 @@ function buildViewerUrl(result) {
 }
 
 async function getThumbnailUrl(result) {
-  const documentId = result?.name;
+  const documentId = getFirstScanId(result?.name);
   const inventoryNumber = getInventoryNumber(result);
 
   if (!documentId || !inventoryNumber) {
