@@ -17,6 +17,33 @@ It is intentionally a temporary prototype and not the final production experienc
 - supports basic sorting and pagination
 - links each result to the beta research portal for full contextual viewing
 
+## Query syntax (new index)
+
+The search box in `new-index/` accepts more than plain keywords:
+
+- **Structured filters**: `person:`, `place:`, `profession:`, `documenttype:`
+  (alias `type`/`doctype`), `settlement:`, `inventory:` (alias `inv`/`invnr`)
+  and `year:` (alias `date`, accepts a single year or a range like
+  `1680-1690`). These can also be added as chips via the suggestion dropdown.
+- **Wildcards** (`*`, `?`) and **fuzziness** (`~1`, `~2`, or bare `~` for
+  `AUTO`), e.g. `timmerman*` or `timmerman~1`.
+- **Boolean operators** `AND`, `OR`, `NOT` and parentheses for grouping, e.g.
+  `(place:Amsterdam OR place:Deventer) NOT profession:koopman`. `AND` is
+  optional between clauses — `NOT` alone already excludes a term.
+- **Proximity search**: wrap terms in `(...)~N` to require them within `N`
+  words of each other, e.g. `(amsterdam timmerman)~5`. Words inside a
+  proximity group may end in `~`/`~N` for a fuzzy match, e.g.
+  `(amsterdam~ timmerman)~10`. A structured filter can also be combined with
+  free text in the same group, e.g. `(place:Amsterdam timmerman)~5` — since
+  Elasticsearch can't natively relate a nested annotation to a free-text
+  term's position, the proxy (`new-index/proxy.py`) re-checks the real word
+  distance for these mixed groups using the document text and the stored
+  annotation offsets.
+
+Result links and thumbnails point at the first scan of a document; documents
+that span a scan range (e.g. `NL-HaNA_1.04.02_4059_0491-0492`) are linked
+using just the first scan (`..._0491`).
+
 ## Local development
 
 The search UI and its proxy both need to run locally. The proxy forwards search
