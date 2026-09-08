@@ -36,6 +36,13 @@ FIELD_DEFS.forEach((def) => {
   (def.aliases || []).forEach((alias) => FIELD_ALIASES.set(alias, def.key));
 });
 
+// Fields eligible for cross-field value suggestions when typing a bare word (no "field:"
+// prefix yet). "year" is excluded since it isn't looked up via the /suggest endpoint.
+const CROSS_SUGGEST_FIELDS = FIELD_DEFS.filter((def) => def.kind !== 'year');
+// Cap on how many cross-field value suggestions are shown at once, so the dropdown
+// doesn't get overwhelmed when a short prefix matches many fields.
+const CROSS_SUGGEST_MAX_RESULTS = 8;
+
 function getSearchParams() {
   const params = new URLSearchParams(window.location.search);
   const filters = params.get('filters') || '';
@@ -684,19 +691,93 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl, previewEl
     suggestionsEl.innerHTML = '';
   }
 
-  function showFieldSuggestions(word, start) {
+  // Applies a cross-field value suggestion (e.g. picking "amsterdam" for "place" while the
+  // input just has the bare word "am") — commits it as a chip when it's the sole input
+  // content, or inserts a "field:value" segment in place otherwise.
+  function applyWordSuggestion(word, fieldKey, value, sourceEl) {
+    if (!value) return false;
+    const token = { fieldKey, value, start: word.start, end: word.end };
+    if (isSoleToken(token)) return commitToken(token, sourceEl);
+    const formatted = /\s/.test(value) ? `"${value}"` : value;
+    inputEl.value = `${inputEl.value.slice(0, word.start)}${fieldKey}:${formatted}${inputEl.value.slice(word.end)}`;
+    const cursor = word.start + fieldKey.length + 1 + formatted.length;
+    inputEl.focus();
+    inputEl.setSelectionRange(cursor, cursor);
+    renderExpressionPreview();
+    hideSuggestions();
+    return true;
+  }
+
+  // Debounced lookup of matching indexed values across every structured field at once (e.g.
+  // "am" -> "place:amsterdam", "person:amrabat") from the /suggest endpoint. Only kicks in
+  // once the bare word is at least SUGGEST_MIN_CHARS long.
+  function fetchCrossFieldSuggestions(word) {
+    const prefix = word.word.trim();
+    if (prefix.length < SUGGEST_MIN_CHARS || hasExplicitWildcard(prefix)) return;
+
+    const requestId = suggestRequestId;
+    suggestDebounceTimer = window.setTimeout(async () => {
+      const controller = new AbortController();
+      suggestAbortController = controller;
+      try {
+        const results = await Promise.all(
+          CROSS_SUGGEST_FIELDS.map((def) =>
+            fetch(SUGGEST_URL, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ field: def.key, prefix }),
+              signal: controller.signal,
+            })
+              .then((response) => (response.ok ? response.json() : { suggestions: [] }))
+              .then((data) => ({ def, suggestions: data.suggestions || [] }))
+              .catch((error) => {
+                if (error.name === 'AbortError') throw error;
+                return { def, suggestions: [] };
+              })
+          )
+        );
+        if (requestId !== suggestRequestId) return;
+
+        const valueItems = results
+          .flatMap(({ def, suggestions }) =>
+            suggestions
+              .filter((item) => item.value.toLowerCase() !== prefix.toLowerCase())
+              .map((item) => ({ def, item }))
+          )
+          .sort((a, b) => (b.item.count ?? 0) - (a.item.count ?? 0))
+          .slice(0, CROSS_SUGGEST_MAX_RESULTS)
+          .map(({ def, item }) => ({
+            apply: (sourceEl) => applyWordSuggestion(word, def.key, item.value, sourceEl),
+            html: `
+              <span class="query-chip query-chip-preview" data-field="${def.key}">
+                <span class="field-name">${escapeHtml(def.label)}:</span>
+                <span>${escapeHtml(item.value)}</span>
+              </span>
+              <span class="hint">${item.count == null ? 'Suggested' : `${item.count} result${item.count === 1 ? '' : 's'}`}</span>
+            `,
+          }));
+
+        currentSuggestions = [...currentSuggestions, ...valueItems];
+        renderSuggestions();
+      } catch (error) {
+        if (error.name !== 'AbortError') console.error(error);
+      }
+    }, SUGGEST_DEBOUNCE_MS);
+  }
+
+  // Shows suggestions for a bare trailing word with no "field:" prefix yet: matching field
+  // names (e.g. "pl" -> "place:") plus, once it's at least SUGGEST_MIN_CHARS long, matching
+  // indexed values across every structured field (e.g. "am" -> "place:amsterdam").
+  function showWordSuggestions(word) {
     cancelPendingSuggestFetch();
     selectedIndex = -1;
-    const lowerWord = word.toLowerCase();
-    const matches = FIELD_DEFS.filter((def) => def.key.startsWith(lowerWord));
-    if (!word || !matches.length) {
-      hideSuggestions();
-      return;
-    }
-    currentSuggestions = matches.map((def) => ({
+    const lowerWord = word.word.toLowerCase();
+    const fieldMatches = FIELD_DEFS.filter((def) => def.key.startsWith(lowerWord));
+
+    currentSuggestions = fieldMatches.map((def) => ({
       apply: () => {
-        const cursor = start + def.key.length + 1;
-        inputEl.value = `${inputEl.value.slice(0, start)}${def.key}:${inputEl.value.slice(start + word.length)}`;
+        const cursor = word.start + def.key.length + 1;
+        inputEl.value = `${inputEl.value.slice(0, word.start)}${def.key}:${inputEl.value.slice(word.start + word.word.length)}`;
         inputEl.focus();
         inputEl.setSelectionRange(cursor, cursor);
         updateSuggestions();
@@ -706,7 +787,15 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl, previewEl
         <span class="hint">${escapeHtml(def.hint)}</span>
       `,
     }));
-    renderSuggestions();
+
+    if (currentSuggestions.length) {
+      renderSuggestions();
+    } else {
+      suggestionsEl.hidden = true;
+      suggestionsEl.innerHTML = '';
+    }
+
+    fetchCrossFieldSuggestions(word);
   }
 
   function buildTypedValueSuggestion(token, def) {
@@ -841,7 +930,7 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl, previewEl
     }
     const word = getTrailingWord();
     if (word && word.word) {
-      showFieldSuggestions(word.word, word.start);
+      showWordSuggestions(word);
       return;
     }
     hideSuggestions();
