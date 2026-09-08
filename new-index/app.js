@@ -1,9 +1,4 @@
-// For local development, you can run a local instance of the search API and point to it here instead of the production endpoint.
-// const API_URL = 'http://localhost:5050/search';
-// const SUGGEST_URL = 'http://localhost:5050/suggest';
-
 const API_URL = 'https://search.globalise.huygens.knaw.nl/documents/_search';
-const SUGGEST_URL = 'https://search.globalise.huygens.knaw.nl/suggest';
 const SUGGEST_MIN_CHARS = 2;
 const SUGGEST_DEBOUNCE_MS = 250;
 
@@ -185,6 +180,184 @@ function buildYearRangeClause(value) {
 
 // Returns { query, proximityGroups }: proximityGroups lists any (structural + free-text)
 // proximity groups that need backend refinement, see buildProximityClause below.
+// Result caps for the different suggestion strategies used below.
+const SUGGEST_AGG_FETCH_SIZE = 30; // nested/keyword fields: raw ES buckets fetched, before merging case variants.
+const SUGGEST_AGG_RESULT_SIZE = 10; // nested/keyword fields: how many merged, distinct values to keep.
+const SUGGEST_TEXT_SAMPLE_SIZE = 300; // text fields: how many raw docs to sample and de-dup client-side.
+const SUGGEST_TEXT_RESULT_SIZE = 10; // text fields: how many distinct values to keep after de-duping the sample.
+
+// Builds the Elasticsearch request body used to look up suggestions for a given field and
+// typed prefix. There is no dedicated /suggest endpoint on this cluster — suggestions are
+// queried directly from the documents index, via one of three strategies depending on how
+// the field is actually indexed:
+//  - "nested" (person/place): a nested aggregation on observances.label — a real keyword
+//    field — filtered to the right observances.type. Gives exact, corpus-wide counts.
+//  - "keyword" (settlement/inventory): a plain terms aggregation on the field itself. Also
+//    exact counts.
+//  - "text" (profession/documenttype): these are only indexed as analyzed text, with no
+//    aggregatable keyword sub-field and no fielddata enabled, so a real aggregation isn't
+//    possible here. Instead we sample matching documents and de-duplicate the raw values
+//    client-side in extractSuggestionsFromResponse — counts there are "seen in this sample",
+//    not exact corpus-wide counts. (The clean fix would be enabling `fielddata: true` on
+//    professionLabelPaths.tree / documentTypeLabelPaths.tree server-side, which would let us
+//    aggregate on the hierarchy directly — worth raising with whoever maintains the index.)
+function buildSuggestRequestBody(def, prefix) {
+  if (def.kind === 'nested') {
+    const filter = [
+      { term: { 'observances.type': def.type } },
+      { prefix: { 'observances.label': { value: prefix, case_insensitive: true } } },
+    ];
+    return {
+      size: 0,
+      query: { nested: { path: 'observances', query: { bool: { filter } } } },
+      aggs: {
+        obs: {
+          nested: { path: 'observances' },
+          aggs: {
+            filtered: {
+              filter: { bool: { filter } },
+              aggs: {
+                top_values: { terms: { field: 'observances.label', size: SUGGEST_AGG_FETCH_SIZE, order: { _count: 'desc' } } },
+              },
+            },
+          },
+        },
+      },
+    };
+  }
+
+  if (def.kind === 'keyword') {
+    return {
+      size: 0,
+      query: { prefix: { [def.field]: { value: prefix, case_insensitive: true } } },
+      aggs: {
+        top_values: { terms: { field: def.field, size: SUGGEST_AGG_FETCH_SIZE, order: { _count: 'desc' } } },
+      },
+    };
+  }
+
+  if (def.kind === 'text') {
+    return {
+      size: SUGGEST_TEXT_SAMPLE_SIZE,
+      _source: [def.field],
+      query: { match_phrase_prefix: { [def.field]: prefix } },
+    };
+  }
+
+  return null; // e.g. "year", which has no live value suggestions.
+}
+
+// Checks whether `value` genuinely contains the word sequence in `prefixWords`, mirroring the
+// same semantics as the match_phrase_prefix query above (all words but the last must appear
+// as an exact, consecutive sequence; the last word only needs to be a prefix match). This
+// matters because "text" fields here are multi-valued: a document can match the query via one
+// array entry while also carrying sibling entries that don't themselves contain the typed
+// prefix at all — this filters those incidental siblings back out.
+function valueMatchesPhrasePrefix(value, prefixWords) {
+  const words = value.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  for (let start = 0; start <= words.length - prefixWords.length; start += 1) {
+    let matched = true;
+    for (let i = 0; i < prefixWords.length - 1; i += 1) {
+      if (words[start + i] !== prefixWords[i]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched && words[start + prefixWords.length - 1]?.startsWith(prefixWords[prefixWords.length - 1])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// observances.label / settlement / inventoryNumber are keyword fields, so a terms aggregation
+// buckets on the exact stored string — including capitalization. Historical/OCR'd data often
+// has the same real value stored under multiple casings (e.g. "Amsterdam" and "amsterdam" as
+// separate buckets), which would otherwise show up as duplicate-looking suggestions. Since the
+// actual search-time clause (chipToEsClause) already matches case-insensitively, it's safe to
+// merge same-value-different-casing buckets here: sum their counts, and keep whichever exact
+// casing occurred most often as the display value.
+function mergeCaseInsensitiveDuplicates(items) {
+  const merged = new Map(); // lowercase value -> { bestValue, bestCount, totalCount }
+  items.forEach(({ value, count }) => {
+    const key = value.toLowerCase();
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, { bestValue: value, bestCount: count, totalCount: count });
+      return;
+    }
+    existing.totalCount += count;
+    if (count > existing.bestCount) {
+      existing.bestValue = value;
+      existing.bestCount = count;
+    }
+  });
+  return Array.from(merged.values())
+    .map(({ bestValue, totalCount }) => ({ value: bestValue, count: totalCount }))
+    .sort((a, b) => b.count - a.count);
+}
+
+// Turns a /documents/_search response into a plain [{ value, count }] list, using whichever
+// strategy matches how the request was built in buildSuggestRequestBody above.
+function extractSuggestionsFromResponse(def, prefix, data) {
+  if (def.kind === 'nested') {
+    const buckets = data?.aggregations?.obs?.filtered?.top_values?.buckets || [];
+    const items = buckets.map((bucket) => ({ value: bucket.key, count: bucket.doc_count }));
+    return mergeCaseInsensitiveDuplicates(items).slice(0, SUGGEST_AGG_RESULT_SIZE);
+  }
+
+  if (def.kind === 'keyword') {
+    const buckets = data?.aggregations?.top_values?.buckets || [];
+    const items = buckets.map((bucket) => ({ value: bucket.key, count: bucket.doc_count }));
+    return mergeCaseInsensitiveDuplicates(items).slice(0, SUGGEST_AGG_RESULT_SIZE);
+  }
+
+  if (def.kind === 'text') {
+    const prefixWords = prefix.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    if (!prefixWords.length) return [];
+    const counts = new Map();
+    (data?.hits?.hits || []).forEach((hit) => {
+      const raw = hit._source?.[def.field];
+      const values = Array.isArray(raw) ? raw : raw ? [raw] : [];
+      values.forEach((value) => {
+        if (valueMatchesPhrasePrefix(value, prefixWords)) {
+          counts.set(value, (counts.get(value) || 0) + 1);
+        }
+      });
+    });
+    return Array.from(counts.entries())
+      .map(([value, count]) => ({ value, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, SUGGEST_TEXT_RESULT_SIZE);
+  }
+
+  return [];
+}
+
+// Fetches and normalizes suggestions for one field. Resolves to [] on any failure (including
+// non-OK responses) so callers querying several fields in parallel can proceed with whatever
+// else succeeded, rather than one field's error taking down the whole suggestion list.
+async function fetchSuggestionsForField(def, prefix, signal) {
+  const body = buildSuggestRequestBody(def, prefix);
+  if (!body) return [];
+  const response = await fetch(API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!response.ok) return [];
+  const data = await response.json();
+  return extractSuggestionsFromResponse(def, prefix, data);
+}
+
+// For hierarchical "text" fields (profession/documenttype), display the pipe-delimited path
+// as a readable breadcrumb, e.g. "Ambachtslieden|timmerman" -> "Ambachtslieden › timmerman".
+// The underlying value used when the suggestion is applied stays the original raw string.
+function formatSuggestionValue(def, value) {
+  return def.kind === 'text' ? value.split('|').join(' › ') : value;
+}
+
 function buildEsQuery(keywordText, chips) {
   const proximityGroups = [];
   const expressionClause = parseKeywordExpression(keywordText, proximityGroups);
@@ -713,8 +886,9 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl, previewEl
   }
 
   // Debounced lookup of matching indexed values across every structured field at once (e.g.
-  // "am" -> "place:amsterdam", "person:amrabat") from the /suggest endpoint. Only kicks in
-  // once the bare word is at least SUGGEST_MIN_CHARS long.
+  // "am" -> "place:amsterdam", "person:amrabat"), queried directly against the documents
+  // index (see fetchSuggestionsForField). Only kicks in once the bare word is at least
+  // SUGGEST_MIN_CHARS long.
   function fetchCrossFieldSuggestions(word) {
     const prefix = word.word.trim();
     if (prefix.length < SUGGEST_MIN_CHARS || hasExplicitWildcard(prefix)) return;
@@ -726,14 +900,8 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl, previewEl
       try {
         const results = await Promise.all(
           CROSS_SUGGEST_FIELDS.map((def) =>
-            fetch(SUGGEST_URL, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ field: def.key, prefix }),
-              signal: controller.signal,
-            })
-              .then((response) => (response.ok ? response.json() : { suggestions: [] }))
-              .then((data) => ({ def, suggestions: data.suggestions || [] }))
+            fetchSuggestionsForField(def, prefix, controller.signal)
+              .then((suggestions) => ({ def, suggestions }))
               .catch((error) => {
                 if (error.name === 'AbortError') throw error;
                 return { def, suggestions: [] };
@@ -755,7 +923,7 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl, previewEl
             html: `
               <span class="query-chip query-chip-preview" data-field="${def.key}">
                 <span class="field-name">${escapeHtml(def.label)}:</span>
-                <span>${escapeHtml(item.value)}</span>
+                <span>${escapeHtml(formatSuggestionValue(def, item.value))}</span>
               </span>
               <span class="hint">${item.count == null ? 'Suggested' : `${item.count} result${item.count === 1 ? '' : 's'}`}</span>
             `,
@@ -833,7 +1001,8 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl, previewEl
     fetchValueSuggestions(token, def);
   }
 
-  // Debounced lookup of matching indexed values (e.g. "place:Am" -> "Amsterdam") from the /suggest endpoint.
+  // Debounced lookup of matching indexed values (e.g. "place:Am" -> "Amsterdam"), queried
+  // directly against the documents index (see fetchSuggestionsForField).
   function fetchValueSuggestions(token, def) {
     const prefix = token.value.trim();
     if (def.kind === 'year' || prefix.length < SUGGEST_MIN_CHARS || hasExplicitWildcard(prefix)) return;
@@ -843,24 +1012,17 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl, previewEl
       const controller = new AbortController();
       suggestAbortController = controller;
       try {
-        const response = await fetch(SUGGEST_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ field: token.fieldKey, prefix }),
-          signal: controller.signal,
-        });
-        if (!response.ok || requestId !== suggestRequestId) return;
-        const data = await response.json();
+        const suggestions = await fetchSuggestionsForField(def, prefix, controller.signal);
         if (requestId !== suggestRequestId) return;
 
-        const valueItems = (data.suggestions || [])
+        const valueItems = suggestions
           .filter((item) => item.value.toLowerCase() !== prefix.toLowerCase())
           .map((item) => ({
             apply: (sourceEl) => applyTokenValue(token, sourceEl, item.value),
             html: `
               <span class="query-chip query-chip-preview" data-field="${token.fieldKey}">
                 <span class="field-name">${escapeHtml(def.label)}:</span>
-                <span>${escapeHtml(item.value)}</span>
+                <span>${escapeHtml(formatSuggestionValue(def, item.value))}</span>
               </span>
               <span class="hint">${item.count == null ? 'Suggested' : `${item.count} result${item.count === 1 ? '' : 's'}`}</span>
             `,
