@@ -1,5 +1,9 @@
-const API_URL = 'http://localhost:5050/search';
-const SUGGEST_URL = 'http://localhost:5050/suggest';
+// For local development, you can run a local instance of the search API and point to it here instead of the production endpoint.
+// const API_URL = 'http://localhost:5050/search';
+// const SUGGEST_URL = 'http://localhost:5050/suggest';
+
+const API_URL = 'https://search.globalise.huygens.knaw.nl/search';
+const SUGGEST_URL = 'https://search.globalise.huygens.knaw.nl/suggest';
 const SUGGEST_MIN_CHARS = 2;
 const SUGGEST_DEBOUNCE_MS = 250;
 
