@@ -2,7 +2,7 @@
 // const API_URL = 'http://localhost:5050/search';
 // const SUGGEST_URL = 'http://localhost:5050/suggest';
 
-const API_URL = 'https://search.globalise.huygens.knaw.nl/search';
+const API_URL = 'https://search.globalise.huygens.knaw.nl/documents/_search';
 const SUGGEST_URL = 'https://search.globalise.huygens.knaw.nl/suggest';
 const SUGGEST_MIN_CHARS = 2;
 const SUGGEST_DEBOUNCE_MS = 250;
