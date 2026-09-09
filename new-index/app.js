@@ -1,4 +1,5 @@
 const API_URL = 'https://search.globalise.huygens.knaw.nl/documents/_search';
+const AUTOCOMPLETE_URL = 'https://search.globalise.huygens.knaw.nl/autocomplete/_search';
 const SUGGEST_MIN_CHARS = 2;
 const SUGGEST_DEBOUNCE_MS = 250;
 
@@ -19,7 +20,8 @@ let currentResults = [];
 
 // Structured search fields exposed by the "documents" index, selectable via "field:value" in the search bar.
 const FIELD_DEFS = [
-  { key: 'person', label: 'Person', hint: 'Find persons mentioned in the text, e.g. am*', kind: 'nested', type: 'Person' },
+  { key: 'person', label: 'Person', hint: 'Find mentions of a person by role, e.g. am*', kind: 'nested', type: 'Person' },
+  { key: 'personname', label: 'Person name', hint: 'Find a specific named individual, e.g. Sleuter', kind: 'personname', aliases: ['name'] },
   { key: 'place', label: 'Place', hint: 'Find places mentioned in the text, e.g. am*', kind: 'nested', type: 'Place', aliases: ['location'] },
   { key: 'profession', label: 'Profession', hint: 'Find by profession, e.g. koop*', kind: 'text', field: 'professionLabelPaths' },
   { key: 'documenttype', label: 'Document type', hint: 'Find by document type, e.g. brief', kind: 'text', field: 'documentTypeLabelPaths', aliases: ['type', 'doctype'] },
@@ -54,8 +56,24 @@ function getSearchParams() {
   };
 }
 
+// Chips are usually just "fieldKey:value" for a compact, readable URL. Chips that came from a
+// resolved suggestion (a linked place/person entity, or a profession hierarchy level) carry
+// extra metadata needed to reproduce the richer search clause in chipToEsClause — those are
+// encoded as "fieldKey:<json>" instead. Plain "fieldKey:value" chips (including ones from
+// older shared URLs) always decode fine; they just don't get the richer matching behavior.
 function encodeChips(chips) {
-  return chips.map((chip) => `${chip.fieldKey}:${encodeURIComponent(chip.value)}`).join('|');
+  return chips
+    .map((chip) => {
+      const extra = {};
+      if (chip.resolvedId) extra.id = chip.resolvedId;
+      if (chip.variants && chip.variants.length) extra.variants = chip.variants;
+      if (chip.hierarchical) extra.h = 1;
+      if (Object.keys(extra).length === 0) {
+        return `${chip.fieldKey}:${encodeURIComponent(chip.value)}`;
+      }
+      return `${chip.fieldKey}:${encodeURIComponent(JSON.stringify({ value: chip.value, ...extra }))}`;
+    })
+    .join('|');
 }
 
 function decodeChips(raw) {
@@ -66,8 +84,22 @@ function decodeChips(raw) {
       const separatorIndex = part.indexOf(':');
       if (separatorIndex === -1) return null;
       const fieldKey = part.slice(0, separatorIndex);
-      const value = decodeURIComponent(part.slice(separatorIndex + 1));
-      return FIELD_BY_KEY.has(fieldKey) && value ? { fieldKey, value } : null;
+      if (!FIELD_BY_KEY.has(fieldKey)) return null;
+      const rawValue = decodeURIComponent(part.slice(separatorIndex + 1));
+      if (rawValue.startsWith('{')) {
+        try {
+          const payload = JSON.parse(rawValue);
+          if (!payload.value) return null;
+          const chip = { fieldKey, value: payload.value };
+          if (payload.id) chip.resolvedId = payload.id;
+          if (payload.variants) chip.variants = payload.variants;
+          if (payload.h) chip.hierarchical = true;
+          return chip;
+        } catch (error) {
+          return null;
+        }
+      }
+      return rawValue ? { fieldKey, value: rawValue } : null;
     })
     .filter(Boolean);
 }
@@ -113,32 +145,50 @@ function chipToEsClause(chip) {
   if (!def || !value) return null;
 
   if (def.kind === 'nested') {
+    // Chips picked from a suggestion carry the canonical entity id shared across every
+    // recorded spelling of that person/place (see buildSuggestRequestBody's "nested" branch).
+    // Matching on that id, rather than the literal label text, also catches variants a
+    // wildcard would miss entirely — e.g. OCR noise like "amsterd.m" sharing Amsterdam's id.
+    // A manually-typed value (no resolvedId) falls back to the previous wildcard match.
+    const filter = chip.resolvedId
+      ? [{ term: { 'observances.type': def.type } }, { term: { 'observances.id': chip.resolvedId } }]
+      : [{ term: { 'observances.type': def.type } }];
+    const clause = { nested: { path: 'observances', query: { bool: { filter } } } };
+    if (!chip.resolvedId) {
+      clause.nested.query.bool.must = [
+        { wildcard: { 'observances.label': { value: toWildcardPattern(value), case_insensitive: true } } },
+      ];
+    }
+    return clause;
+  }
+
+  if (def.kind === 'personname') {
+    // Chips picked from a suggestion carry every known spelling variant for that individual
+    // (from the autocomplete completion index's "labels"); match any of them as an exact
+    // phrase in the free text. A manually-typed, unresolved value just matches that one phrase.
+    const variants = chip.variants && chip.variants.length ? chip.variants : [value];
     return {
-      nested: {
-        path: 'observances',
-        query: {
-          bool: {
-            filter: [{ term: { 'observances.type': def.type } }],
-            must: [
-              {
-                wildcard: {
-                  'observances.label': {
-                    value: toWildcardPattern(value),
-                    case_insensitive: true,
-                  },
-                },
-              },
-            ],
-          },
-        },
+      bool: {
+        should: variants.map((variant) => ({ match_phrase: { text: variant } })),
+        minimum_should_match: 1,
       },
     };
   }
 
   if (def.kind === 'text') {
-    return hasExplicitWildcard(value)
-      ? { wildcard: { [def.field]: { value, case_insensitive: true } } }
-      : { match: { [def.field]: value } };
+    if (hasExplicitWildcard(value)) {
+      return { wildcard: { [def.field]: { value, case_insensitive: true } } };
+    }
+    // Chips picked from a hierarchy suggestion carry the exact "|"-joined path level (a
+    // category or a full leaf profession). A term query against the .tree sub-field — indexed
+    // with the same path_hierarchy delimiter — matches that level and every more specific
+    // descendant beneath it, e.g. selecting "Ambachtslieden" also matches
+    // "...|Ambachtslieden|timmerman" and "...|Ambachtslieden|kuiper". A manually-typed value
+    // (no hierarchical flag) falls back to the previous loose word match.
+    if (chip.hierarchical) {
+      return { term: { [`${def.field}.tree`]: value } };
+    }
+    return { match: { [def.field]: value } };
   }
 
   if (def.kind === 'keyword') {
@@ -188,17 +238,22 @@ const SUGGEST_TEXT_RESULT_SIZE = 10; // text fields: how many distinct values to
 
 // Builds the Elasticsearch request body used to look up suggestions for a given field and
 // typed prefix. There is no dedicated /suggest endpoint on this cluster — suggestions are
-// queried directly from the documents index, via one of three strategies depending on how
-// the field is actually indexed:
-//  - "nested" (person/place): a nested aggregation on observances.label — a real keyword
-//    field — filtered to the right observances.type. Gives exact, corpus-wide counts.
-//  - "keyword" (settlement/inventory): a plain terms aggregation on the field itself. Also
-//    exact counts.
-//  - "text" (profession/documenttype): these are only indexed as analyzed text, with no
-//    aggregatable keyword sub-field and no fielddata enabled, so a real aggregation isn't
-//    possible here. Instead we sample matching documents and de-duplicate the raw values
-//    client-side in extractSuggestionsFromResponse — counts there are "seen in this sample",
-//    not exact corpus-wide counts. (The clean fix would be enabling `fielddata: true` on
+// queried directly, via one of four strategies depending on how the field is actually indexed:
+//  - "nested" (person/place): a nested aggregation on observances.id — the canonical entity id
+//    shared across every recorded spelling of that mention (confirmed live: "Amsterdam",
+//    "amsterdam" and even OCR-mangled "amsterd.m" all share id "GLOB2_937") — filtered to the
+//    right observances.type, with a small sub-aggregation to pick a representative label per
+//    id for display. Gives exact, corpus-wide counts and one clean suggestion per real entity.
+//  - "personname": named individuals aren't resolved this way in the documents index at all
+//    (see below) — instead this queries the separate "autocomplete" index directly, which is a
+//    completion suggester built specifically for person names and their spelling variants.
+//  - "keyword" (settlement/inventory): a plain terms aggregation on the field itself. Exact
+//    counts.
+//  - "text" (profession/documenttype): only indexed as analyzed text, with no aggregatable
+//    keyword sub-field and no fielddata enabled, so a real aggregation isn't possible here.
+//    Instead we sample matching documents and de-duplicate the raw values client-side in
+//    extractSuggestionsFromResponse — counts there are "seen in this sample", not exact
+//    corpus-wide counts. (The clean fix would be enabling `fielddata: true` on
 //    professionLabelPaths.tree / documentTypeLabelPaths.tree server-side, which would let us
 //    aggregate on the hierarchy directly — worth raising with whoever maintains the index.)
 function buildSuggestRequestBody(def, prefix) {
@@ -217,12 +272,33 @@ function buildSuggestRequestBody(def, prefix) {
             filtered: {
               filter: { bool: { filter } },
               aggs: {
-                top_values: { terms: { field: 'observances.label', size: SUGGEST_AGG_FETCH_SIZE, order: { _count: 'desc' } } },
+                by_id: {
+                  terms: { field: 'observances.id', size: SUGGEST_AGG_FETCH_SIZE, order: { _count: 'desc' } },
+                  aggs: {
+                    top_label: { terms: { field: 'observances.label', size: 1, order: { _count: 'desc' } } },
+                  },
+                },
               },
             },
           },
         },
       },
+    };
+  }
+
+  // Named individuals like "Jogem Hendrik Sleuter" aren't stored as Person-type observances in
+  // the documents index at all — those are generic mentions inferred from occupation words
+  // (e.g. "bakker" implies "a person, a baker, is mentioned"), not resolved named people. The
+  // "autocomplete" index is a separate, dedicated Person-name completion index instead.
+  if (def.kind === 'personname') {
+    return {
+      suggest: {
+        'value-suggest': {
+          prefix,
+          completion: { field: 'labels', size: SUGGEST_AGG_FETCH_SIZE, skip_duplicates: true },
+        },
+      },
+      _source: ['type', 'preferredLabel', 'identifier', 'labels'],
     };
   }
 
@@ -245,6 +321,19 @@ function buildSuggestRequestBody(def, prefix) {
   }
 
   return null; // e.g. "year", which has no live value suggestions.
+}
+
+// Builds every cumulative "|"-joined prefix level of a hierarchical path, from the root down
+// to the full leaf value, e.g. "A|B|C" -> ["A", "A|B", "A|B|C"]. Used so that typing a category
+// name (e.g. "ambachtslieden") can surface that category itself as a selectable suggestion —
+// not just the specific leaf professions matched by a more specific prefix like "tim".
+function cumulativeHierarchyLevels(value) {
+  const parts = value.split('|');
+  const levels = [];
+  for (let i = 0; i < parts.length; i += 1) {
+    levels.push(parts.slice(0, i + 1).join('|'));
+  }
+  return levels;
 }
 
 // Checks whether `value` genuinely contains the word sequence in `prefixWords`, mirroring the
@@ -297,13 +386,33 @@ function mergeCaseInsensitiveDuplicates(items) {
     .sort((a, b) => b.count - a.count);
 }
 
-// Turns a /documents/_search response into a plain [{ value, count }] list, using whichever
-// strategy matches how the request was built in buildSuggestRequestBody above.
+// Turns a suggestion response into a plain [{ value, count, resolvedId?, variants? }] list,
+// using whichever strategy matches how the request was built in buildSuggestRequestBody above.
 function extractSuggestionsFromResponse(def, prefix, data) {
   if (def.kind === 'nested') {
-    const buckets = data?.aggregations?.obs?.filtered?.top_values?.buckets || [];
-    const items = buckets.map((bucket) => ({ value: bucket.key, count: bucket.doc_count }));
-    return mergeCaseInsensitiveDuplicates(items).slice(0, SUGGEST_AGG_RESULT_SIZE);
+    const buckets = data?.aggregations?.obs?.filtered?.by_id?.buckets || [];
+    return buckets
+      .map((bucket) => {
+        const topLabelBucket = bucket.top_label?.buckets?.[0];
+        return {
+          value: topLabelBucket ? topLabelBucket.key : bucket.key,
+          count: bucket.doc_count,
+          resolvedId: bucket.key,
+        };
+      })
+      .slice(0, SUGGEST_AGG_RESULT_SIZE);
+  }
+
+  if (def.kind === 'personname') {
+    const options = data?.suggest?.['value-suggest']?.[0]?.options || [];
+    return options
+      .map((option) => ({
+        value: option._source?.preferredLabel || option.text,
+        count: null, // the completion suggester ranks by relevance, not corpus frequency.
+        resolvedId: option._source?.identifier,
+        variants: option._source?.labels && option._source.labels.length ? option._source.labels : [option.text],
+      }))
+      .slice(0, SUGGEST_AGG_RESULT_SIZE);
   }
 
   if (def.kind === 'keyword') {
@@ -320,9 +429,14 @@ function extractSuggestionsFromResponse(def, prefix, data) {
       const raw = hit._source?.[def.field];
       const values = Array.isArray(raw) ? raw : raw ? [raw] : [];
       values.forEach((value) => {
-        if (valueMatchesPhrasePrefix(value, prefixWords)) {
-          counts.set(value, (counts.get(value) || 0) + 1);
-        }
+        // Check every level of the hierarchy independently, not just the full leaf value —
+        // this lets a category name (e.g. "ambachtslieden") surface as its own suggestion,
+        // separate from the more specific leaf professions beneath it (e.g. "timmerman").
+        cumulativeHierarchyLevels(value).forEach((level) => {
+          if (valueMatchesPhrasePrefix(level, prefixWords)) {
+            counts.set(level, (counts.get(level) || 0) + 1);
+          }
+        });
       });
     });
     return Array.from(counts.entries())
@@ -340,7 +454,8 @@ function extractSuggestionsFromResponse(def, prefix, data) {
 async function fetchSuggestionsForField(def, prefix, signal) {
   const body = buildSuggestRequestBody(def, prefix);
   if (!body) return [];
-  const response = await fetch(API_URL, {
+  const url = def.kind === 'personname' ? AUTOCOMPLETE_URL : API_URL;
+  const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -356,6 +471,24 @@ async function fetchSuggestionsForField(def, prefix, signal) {
 // The underlying value used when the suggestion is applied stays the original raw string.
 function formatSuggestionValue(def, value) {
   return def.kind === 'text' ? value.split('|').join(' › ') : value;
+}
+
+// Determines what extra metadata (beyond fieldKey/value) a chip should carry when a
+// suggestion item is applied, so chipToEsClause can build the richer, resolved query clause.
+// Only matters when the suggestion becomes a standalone chip (see commitToken) — a value
+// inserted inline into a larger typed expression is just plain text and can't carry this.
+function buildChipExtra(def, item) {
+  const extra = {};
+  if ((def.kind === 'nested' || def.kind === 'personname') && item.resolvedId) {
+    extra.resolvedId = item.resolvedId;
+  }
+  if (def.kind === 'personname' && item.variants && item.variants.length) {
+    extra.variants = item.variants;
+  }
+  if (def.kind === 'text') {
+    extra.hierarchical = true;
+  }
+  return extra;
 }
 
 function buildEsQuery(keywordText, chips) {
@@ -735,15 +868,16 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl, previewEl
 
   function renderChips() {
     chipsEl.innerHTML = chips
-      .map(
-        (chip, index) => `
-          <span class="query-chip" data-index="${index}" data-field="${chip.fieldKey}">
+      .map((chip, index) => {
+        const isResolved = Boolean(chip.resolvedId || (chip.variants && chip.variants.length) || chip.hierarchical);
+        return `
+          <span class="query-chip" data-index="${index}" data-field="${chip.fieldKey}"${isResolved ? ' data-resolved="true"' : ''}>
             <span class="field-name">${escapeHtml(FIELD_BY_KEY.get(chip.fieldKey).label)}:</span>
             <span>${escapeHtml(chip.value)}</span>
             <button type="button" aria-label="Remove ${escapeHtml(FIELD_BY_KEY.get(chip.fieldKey).label)} filter">×</button>
           </span>
-        `
-      )
+        `;
+      })
       .join('');
 
     chipsEl.querySelectorAll('button[aria-label]').forEach((button) => {
@@ -821,9 +955,9 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl, previewEl
     return before.trim() === '' && after.trim() === '';
   }
 
-  function commitToken(token, sourceEl) {
+  function commitToken(token, sourceEl, extra) {
     if (!token.value) return false;
-    chips.push({ fieldKey: token.fieldKey, value: token.value });
+    chips.push({ fieldKey: token.fieldKey, value: token.value, ...extra });
     inputEl.value = `${inputEl.value.slice(0, token.start)}${inputEl.value.slice(token.end)}`.replace(/\s+$/, '');
     renderChips();
     renderExpressionPreview();
@@ -845,12 +979,14 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl, previewEl
     return true;
   }
 
-  // Applies a chosen value to the trailing token: as a chip when it's the sole input
-  // content, or as an in-place replacement when it's part of a bigger expression.
-  function applyTokenValue(token, sourceEl, value) {
+  // Applies a chosen value to the trailing token: as a chip (carrying any extra resolved
+  // metadata) when it's the sole input content, or as an in-place text replacement when it's
+  // part of a bigger expression — inline text can't carry that extra metadata, so it falls
+  // back to whatever plain-value matching chipToEsClause does for an unresolved value.
+  function applyTokenValue(token, sourceEl, value, extra) {
     const finalToken = value === undefined ? token : { ...token, value };
     if (!finalToken.value) return false;
-    return isSoleToken(token) ? commitToken(finalToken, sourceEl) : insertTokenValue(token, finalToken.value);
+    return isSoleToken(token) ? commitToken(finalToken, sourceEl, extra) : insertTokenValue(token, finalToken.value);
   }
 
 
@@ -869,12 +1005,13 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl, previewEl
   }
 
   // Applies a cross-field value suggestion (e.g. picking "amsterdam" for "place" while the
-  // input just has the bare word "am") — commits it as a chip when it's the sole input
-  // content, or inserts a "field:value" segment in place otherwise.
-  function applyWordSuggestion(word, fieldKey, value, sourceEl) {
+  // input just has the bare word "am") — commits it as a chip (carrying any extra resolved
+  // metadata) when it's the sole input content, or inserts a "field:value" segment in place
+  // otherwise (inline text, so no extra metadata carries through).
+  function applyWordSuggestion(word, fieldKey, value, sourceEl, extra) {
     if (!value) return false;
     const token = { fieldKey, value, start: word.start, end: word.end };
-    if (isSoleToken(token)) return commitToken(token, sourceEl);
+    if (isSoleToken(token)) return commitToken(token, sourceEl, extra);
     const formatted = /\s/.test(value) ? `"${value}"` : value;
     inputEl.value = `${inputEl.value.slice(0, word.start)}${fieldKey}:${formatted}${inputEl.value.slice(word.end)}`;
     const cursor = word.start + fieldKey.length + 1 + formatted.length;
@@ -919,7 +1056,7 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl, previewEl
           .sort((a, b) => (b.item.count ?? 0) - (a.item.count ?? 0))
           .slice(0, CROSS_SUGGEST_MAX_RESULTS)
           .map(({ def, item }) => ({
-            apply: (sourceEl) => applyWordSuggestion(word, def.key, item.value, sourceEl),
+            apply: (sourceEl) => applyWordSuggestion(word, def.key, item.value, sourceEl, buildChipExtra(def, item)),
             html: `
               <span class="query-chip query-chip-preview" data-field="${def.key}">
                 <span class="field-name">${escapeHtml(def.label)}:</span>
@@ -1018,7 +1155,7 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl, previewEl
         const valueItems = suggestions
           .filter((item) => item.value.toLowerCase() !== prefix.toLowerCase())
           .map((item) => ({
-            apply: (sourceEl) => applyTokenValue(token, sourceEl, item.value),
+            apply: (sourceEl) => applyTokenValue(token, sourceEl, item.value, buildChipExtra(def, item)),
             html: `
               <span class="query-chip query-chip-preview" data-field="${token.fieldKey}">
                 <span class="field-name">${escapeHtml(def.label)}:</span>
