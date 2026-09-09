@@ -930,7 +930,11 @@ function createQueryBuilder({ formEl, chipsEl, inputEl, suggestionsEl, previewEl
 
   function getTrailingToken() {
     const value = inputEl.value;
-    const match = value.match(/(^|[\s(])([a-zA-Z]+)\s*:\s*("([^"]*)"|([^\s()]*))$/);
+    // Unquoted values may contain single spaces (so multi-word names like "Jogem Hendrik" can
+    // be typed and suggested without needing quotes) but stop at a double space, which signals
+    // "done with this value, starting something new" — mirrors how getTrailingWord() picks up
+    // whatever comes after. A quoted value ("...") can still contain anything, spaces included.
+    const match = value.match(/(^|[\s(])([a-zA-Z]+)\s*:\s*("([^"]*)"|((?:[^\s()]|\s(?!\s))*))$/);
     if (!match) return null;
     const fieldKey = FIELD_ALIASES.get(match[2].toLowerCase());
     if (!fieldKey) return null;
