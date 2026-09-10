@@ -1,4 +1,8 @@
 const API_URL = 'https://search.globalise.huygens.knaw.nl/documents/_search';
+// Bulk endpoint used only for the follow-up "get the exact match count for these specific
+// documents" requests — see fetchExactMatchCounts. Batches one query per document into a
+// single HTTP round trip instead of firing a request per document.
+const MSEARCH_URL = 'https://search.globalise.huygens.knaw.nl/documents/_msearch';
 const AUTOCOMPLETE_URL = 'https://search.globalise.huygens.knaw.nl/autocomplete/_search';
 const SUGGEST_MIN_CHARS = 2;
 const SUGGEST_DEBOUNCE_MS = 250;
@@ -17,6 +21,10 @@ let currentPage = 1;
 let currentQuery = '';
 let currentChips = [];
 let currentResults = [];
+// Bumped at the start of every search(); a follow-up async request (see fetchExactMatchCounts)
+// captures the token at request time and checks it before touching the DOM, so a slow response
+// from a superseded search can't overwrite results from a newer one.
+let searchToken = 0;
 
 // Structured search fields exposed by the "documents" index, selectable via "field:value" in the search bar.
 const FIELD_DEFS = [
@@ -1472,16 +1480,164 @@ async function getThumbnailUrl(result) {
   }
 }
 
-function getHighlightText(result) {
+// Must match `highlight.fields.text.number_of_fragments` in the main search payload above.
+// Fewer fragments than this cap coming back means ES ran out of real matches, not out of room
+// — so that count is already exact. Exactly this many means it's ambiguous (could be exactly
+// this many, could be more), which is what triggers the exact-count follow-up request.
+const FRAGMENT_CAP = 3;
+
+// Turns one raw ES highlight fragment (which contains literal <mark>/</mark> around matched
+// text, but is NOT otherwise HTML-escaped) into safe HTML: escape everything except the mark
+// tags themselves, so stray "<" or "&" in OCR'd source text can't break the page.
+function sanitizeHighlightFragment(raw) {
+  const markRe = /<mark>([\s\S]*?)<\/mark>/g;
+  let lastIndex = 0;
+  let out = '';
+  let match;
+  while ((match = markRe.exec(raw))) {
+    out += escapeHtml(raw.slice(lastIndex, match.index));
+    out += `<mark>${escapeHtml(match[1])}</mark>`;
+    lastIndex = markRe.lastIndex;
+  }
+  out += escapeHtml(raw.slice(lastIndex));
+  return out;
+}
+
+// Counts real matches in a *fully* highlighted field (i.e. a `number_of_fragments: 0` result —
+// see fetchExactMatchCounts). Used only for its count; the follow-up request is scoped to one
+// document so there's no need to also carve display snippets out of it.
+function countHighlightMarks(rawHighlighted) {
+  return (rawHighlighted.match(/<mark>/g) || []).length;
+}
+
+// Returns the (possibly provisional) match count plus ready-to-render snippet blocks for a
+// result, from the cheap capped-fragment highlight on the main search response. matchCount is
+// 0 whenever there was nothing to highlight and we fell back to a plain excerpt — that fallback
+// isn't a real "N matches" signal, so callers should treat 0 as "don't show a match badge".
+// isExact is false exactly when fragments.length === FRAGMENT_CAP, meaning the real count might
+// be higher; fetchExactMatchCounts resolves that ambiguity afterwards for just those results.
+function getHighlightInfo(result) {
   const fragments = result?.highlight?.text ?? [];
-  if (fragments.length) return fragments.join(' … ');
+  if (fragments.length) {
+    return {
+      snippets: fragments.map(sanitizeHighlightFragment),
+      matchCount: fragments.length,
+      isExact: fragments.length < FRAGMENT_CAP,
+    };
+  }
 
   // Structural-only searches (person:/place:/etc.) don't match anything in the "text" field,
   // so Elasticsearch has nothing to highlight. Fall back to a plain excerpt of the document text.
   const fullText = (result?.text || '').replace(/\s+/g, ' ').trim();
-  if (!fullText) return 'No snippet available.';
+  if (!fullText) return { matchCount: 0, snippets: ['No snippet available.'], isExact: true };
   const excerpt = fullText.length > 300 ? `${fullText.slice(0, 300)}…` : fullText;
-  return escapeHtml(excerpt);
+  return { matchCount: 0, snippets: [escapeHtml(excerpt)], isExact: true };
+}
+
+// Renders the match-count indicator shown on a result card, e.g. "●●●+ 3+ matches" while
+// provisional, upgrading in place to e.g. "●●●+ 7 matches" once fetchExactMatchCounts resolves
+// (see there). The dots are visually capped at 3 since a literal dot per match would grow
+// unboundedly; the label text states the count, with a trailing "+" only while it's provisional.
+function renderMatchBadge(matchCount, isExact, badgeId) {
+  if (!matchCount) return '';
+  const maxDots = 3;
+  const filled = Math.min(matchCount, maxDots);
+  const dots = Array.from({ length: maxDots }, (_, i) =>
+    i < filled ? '<span class="match-dot match-dot--filled"></span>' : '<span class="match-dot"></span>'
+  ).join('');
+  const overflow = !isExact ? '<span class="match-dot-overflow">+</span>' : '';
+  const label = `${matchCount}${isExact ? '' : '+'} ${matchCount === 1 && isExact ? 'match' : 'matches'}`;
+  return `
+    <span class="match-badge" id="${badgeId}" data-exact="${isExact}" title="${label} found in this document">
+      <span class="match-dots">${dots}${overflow}</span>
+      <span class="match-badge-label">${label}</span>
+    </span>
+  `;
+}
+
+// Renders each display snippet as its own block so multiple matches in one document are visibly
+// distinct passages rather than one run-on paragraph. Leaves an empty, hidden placeholder line
+// (targeted by moreId) that fetchExactMatchCounts fills in with "+N more matches not shown" if
+// the resolved exact count turns out to exceed what's displayed here.
+function renderSnippetList(snippets, moreId) {
+  const items = snippets.map((snippet) => `<p class="result-snippet">${snippet}</p>`).join('');
+  return `<div class="result-snippets">${items}<p class="result-snippet-more" id="${moreId}" hidden></p></div>`;
+}
+
+// For results whose highlight hit FRAGMENT_CAP (so the main request only tells us "at least
+// this many", not the true total), fetches an exact count via a small follow-up request per
+// document — batched into one `_msearch` call — and patches the already-rendered badge/snippet
+// list in place. Each sub-query re-runs the exact same query as the main search (so match
+// semantics stay identical) but scoped to a single document via an `ids` filter, with
+// `number_of_fragments: 0` so Elasticsearch highlights the whole field and every match can be
+// counted. Deliberately NOT done for every result on the page: documents in this corpus can be
+// very long, and fully highlighting all of them on every page load would be slow and wasteful
+// when, for most results, the capped fragment count is already exact.
+async function fetchExactMatchCounts(pendingItems, esQuery, token) {
+  if (!pendingItems.length) return;
+
+  const ndjsonLines = [];
+  pendingItems.forEach(({ id }) => {
+    ndjsonLines.push(JSON.stringify({}));
+    ndjsonLines.push(
+      JSON.stringify({
+        size: 1,
+        _source: false,
+        query: {
+          bool: {
+            filter: [{ ids: { values: [id] } }],
+            must: [esQuery],
+          },
+        },
+        highlight: {
+          pre_tags: ['<mark>'],
+          post_tags: ['</mark>'],
+          fields: { text: { number_of_fragments: 0 } },
+        },
+      })
+    );
+  });
+
+  let responses;
+  try {
+    const response = await fetch(MSEARCH_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-ndjson' },
+      body: `${ndjsonLines.join('\n')}\n`,
+    });
+    if (!response.ok) throw new Error(`msearch failed with status ${response.status}`);
+    const data = await response.json();
+    responses = Array.isArray(data?.responses) ? data.responses : [];
+  } catch (error) {
+    console.warn('Unable to fetch exact match counts, leaving provisional counts in place:', error);
+    return;
+  }
+
+  if (token !== searchToken) return; // a newer search has since started; discard these results
+
+  pendingItems.forEach(({ badgeId, moreId, displayedCount }, i) => {
+    const raw = responses[i]?.hits?.hits?.[0]?.highlight?.text?.[0];
+    if (!raw) return;
+    const matchCount = countHighlightMarks(raw);
+    if (!matchCount) return;
+
+    const badgeEl = document.getElementById(badgeId);
+    if (badgeEl) {
+      const label = `${matchCount} ${matchCount === 1 ? 'match' : 'matches'}`;
+      badgeEl.dataset.exact = 'true';
+      badgeEl.title = `${label} found in this document`;
+      const labelEl = badgeEl.querySelector('.match-badge-label');
+      if (labelEl) labelEl.textContent = label;
+      badgeEl.querySelector('.match-dot-overflow')?.remove();
+    }
+
+    const moreEl = document.getElementById(moreId);
+    if (moreEl && matchCount > displayedCount) {
+      const hiddenCount = matchCount - displayedCount;
+      moreEl.textContent = `+${hiddenCount} more ${hiddenCount === 1 ? 'match' : 'matches'} not shown`;
+      moreEl.hidden = false;
+    }
+  });
 }
 
 function sortResults(results, sortKey) {
@@ -1540,6 +1696,7 @@ async function search(keywordText, chips, page, sortKey = 'relevance') {
   currentSort = sortKey;
   updateQueryState(trimmedQuery, activeChips, page, sortKey);
 
+  const token = ++searchToken;
   const from = (page - 1) * pageSize;
   const query = await buildEsQuery(trimmedQuery, activeChips);
   const payload = {
@@ -1550,7 +1707,13 @@ async function search(keywordText, chips, page, sortKey = 'relevance') {
       pre_tags: ['<mark>'],
       post_tags: ['</mark>'],
       fields: {
-        text: { fragment_size: 150, number_of_fragments: 3 },
+        // Cheap on purpose: documents in this corpus can be very long, so every result on every
+        // page requesting the *entire* highlighted field would be expensive to compute and slow
+        // to transmit. This gives fast, capped display snippets; getHighlightInfo below detects
+        // when a result hit the cap (FRAGMENT_CAP) and, for just those ambiguous results,
+        // fetchExactMatchCounts makes a separate, scoped, single-document request to get the
+        // real count without paying that cost for every result on the page.
+        text: { fragment_size: 150, number_of_fragments: FRAGMENT_CAP },
       },
     },
     sort: ['_score'],
@@ -1580,12 +1743,16 @@ async function search(keywordText, chips, page, sortKey = 'relevance') {
     const data = await response.json();
     const totalHits = Number(data?.hits?.total?.value ?? 0);
     const hits = Array.isArray(data?.hits?.hits) ? data.hits.hits : [];
-    const results = hits.map((hit) => ({ ...hit._source, highlight: hit.highlight }));
+    const results = hits.map((hit) => ({ ...hit._source, highlight: hit.highlight, _id: hit._id }));
     currentResults = results;
     getSortOptionState(results);
 
     const sortedResults = sortResults(results, currentSort);
-    await renderResults(sortedResults, totalHits, page, trimmedQuery, activeChips, currentSort);
+    const pendingExactCounts = await renderResults(sortedResults, totalHits, page, trimmedQuery, activeChips, currentSort);
+    // Deliberately not awaited: the page is already rendered with provisional "N+ matches"
+    // badges (see FRAGMENT_CAP below), and this only refines the handful of results that hit
+    // the cap. No reason to make the user wait on it.
+    fetchExactMatchCounts(pendingExactCounts, query, token);
   } catch (error) {
     console.error(error);
     if (statusContainer) {
@@ -1617,14 +1784,22 @@ async function renderResults(results, totalHits, page, query, chips, sortKey) {
       resultsContainer.innerHTML = '<div class="empty-state">No matching results were returned.</div>';
     }
     if (paginationContainer) paginationContainer.innerHTML = '';
-    return;
+    return [];
   }
 
+  const pendingExactCounts = [];
   const listHtml = await Promise.all(
-    results.map(async (result) => {
+    results.map(async (result, index) => {
       const documentId = result.name || 'Unknown document';
       const viewerUrl = buildViewerUrl(result);
-      const snippet = getHighlightText(result);
+      const { snippets, matchCount, isExact } = getHighlightInfo(result);
+      const badgeId = `match-badge-${index}`;
+      const moreId = `snippet-more-${index}`;
+      if (!isExact && result._id) {
+        pendingExactCounts.push({ index, id: result._id, badgeId, moreId, displayedCount: snippets.length });
+      }
+      const matchBadge = renderMatchBadge(matchCount, isExact, badgeId);
+      const snippetHtml = renderSnippetList(snippets, moreId);
       const invNr = result.inventoryNumber || 'Unknown inventory';
       const settlement = result.settlement || 'Unknown';
       const year = getYearValue(result);
@@ -1639,10 +1814,10 @@ async function renderResults(results, totalHits, page, query, chips, sortKey) {
           </div>
           <div class="result-content">
             <div class="result-meta">
-              <h2 class="result-title"><a href="${viewerUrl}">${escapeHtml(documentId)}</a></h2>
+              <h2 class="result-title"><a href="${viewerUrl}">${escapeHtml(documentId)}</a>${matchBadge}</h2>
               <small>${year !== null ? `${escapeHtml(year)} · ` : ''}Inventory ${escapeHtml(invNr)} · ${escapeHtml(settlement)}</small>
             </div>
-            <p class="result-snippet">${snippet}</p>
+            ${snippetHtml}
             <div class="result-footer">
               <a href="${viewerUrl}">Open in viewer</a>
             </div>
@@ -1656,6 +1831,7 @@ async function renderResults(results, totalHits, page, query, chips, sortKey) {
     resultsContainer.innerHTML = listHtml;
   }
   renderPagination(page, totalPages, query, chips, sortKey);
+  return pendingExactCounts;
 }
 
 function renderPagination(page, totalPages, query, chips, sortKey) {
