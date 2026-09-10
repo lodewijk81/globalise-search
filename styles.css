@@ -720,11 +720,33 @@ a {
 }
 
 .result-snippet-more {
+  align-self: flex-start;
   margin: 0;
-  padding: 0 10px;
+  padding: 6px 14px;
   font-size: 0.8rem;
-  color: rgba(255, 255, 255, 0.45);
   font-style: italic;
+  color: rgba(255, 255, 255, 0.7);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.result-snippet-more:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.32);
+  color: var(--brand-white);
+}
+
+.result-snippet-more:focus-visible {
+  outline: 2px solid rgba(41, 191, 204, 0.8);
+  outline-offset: 2px;
+}
+
+.result-snippet-more:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .result-footer {

@@ -1556,12 +1556,13 @@ function renderMatchBadge(matchCount, isExact, badgeId) {
 }
 
 // Renders each display snippet as its own block so multiple matches in one document are visibly
-// distinct passages rather than one run-on paragraph. Leaves an empty, hidden placeholder line
-// (targeted by moreId) that fetchExactMatchCounts fills in with "+N more matches not shown" if
-// the resolved exact count turns out to exceed what's displayed here.
+// distinct passages rather than one run-on paragraph. Leaves an empty, hidden "more" button
+// (targeted by moreId) that fetchExactMatchCounts labels "Show N more matches" and wires up if
+// the resolved exact count turns out to exceed what's displayed here; clicking it fetches and
+// appends the rest of that one document's snippets (see loadRemainingSnippets).
 function renderSnippetList(snippets, moreId) {
   const items = snippets.map((snippet) => `<p class="result-snippet">${snippet}</p>`).join('');
-  return `<div class="result-snippets">${items}<p class="result-snippet-more" id="${moreId}" hidden></p></div>`;
+  return `<div class="result-snippets">${items}<button type="button" class="result-snippet-more" id="${moreId}" hidden></button></div>`;
 }
 
 // For results whose highlight hit FRAGMENT_CAP (so the main request only tells us "at least
@@ -1615,7 +1616,7 @@ async function fetchExactMatchCounts(pendingItems, esQuery, token) {
 
   if (token !== searchToken) return; // a newer search has since started; discard these results
 
-  pendingItems.forEach(({ badgeId, moreId, displayedCount }, i) => {
+  pendingItems.forEach(({ id, badgeId, moreId, displayedCount }, i) => {
     const raw = responses[i]?.hits?.hits?.[0]?.highlight?.text?.[0];
     if (!raw) return;
     const matchCount = countHighlightMarks(raw);
@@ -1634,10 +1635,84 @@ async function fetchExactMatchCounts(pendingItems, esQuery, token) {
     const moreEl = document.getElementById(moreId);
     if (moreEl && matchCount > displayedCount) {
       const hiddenCount = matchCount - displayedCount;
-      moreEl.textContent = `+${hiddenCount} more ${hiddenCount === 1 ? 'match' : 'matches'} not shown`;
+      moreEl.textContent = `Show ${hiddenCount} more ${hiddenCount === 1 ? 'match' : 'matches'}`;
       moreEl.hidden = false;
+      // { once: true } so a slow click while a request is already in flight can't fire a second,
+      // redundant fetch for the same document — loadRemainingSnippets removes this button once
+      // the remaining snippets have been fetched and appended.
+      moreEl.addEventListener(
+        'click',
+        () => loadRemainingSnippets(id, esQuery, moreEl, displayedCount, matchCount, token),
+        { once: true }
+      );
     }
   });
+}
+
+// Fetches every remaining snippet for a single document beyond the ones already displayed, and
+// appends them in place, replacing that document's "Show N more matches" button. Triggered only
+// by the user clicking that specific button — so it's always scoped to the one document it
+// belongs to, via the same `ids` filter and re-run query used by fetchExactMatchCounts above. A
+// user wanting every snippet across several matching documents has to click through this
+// separately for each one; there's no "show all" affordance that fans this out across the page.
+async function loadRemainingSnippets(id, esQuery, buttonEl, displayedCount, totalCount, token) {
+  const originalLabel = buttonEl.textContent;
+  buttonEl.disabled = true;
+  buttonEl.textContent = 'Loading…';
+
+  let fragments;
+  try {
+    const response = await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        size: 1,
+        _source: false,
+        query: {
+          bool: {
+            filter: [{ ids: { values: [id] } }],
+            must: [esQuery],
+          },
+        },
+        highlight: {
+          pre_tags: ['<mark>'],
+          post_tags: ['</mark>'],
+          // Requesting exactly the already-known exact total (rather than 0, which highlights
+          // the whole field as one unbroken string) gets every match back pre-cut into the same
+          // kind of bite-sized, contextual fragments as the initial search response.
+          fields: { text: { fragment_size: 150, number_of_fragments: totalCount } },
+        },
+      }),
+    });
+    if (!response.ok) throw new Error(`Fetching remaining snippets failed with status ${response.status}`);
+    const data = await response.json();
+    fragments = data?.hits?.hits?.[0]?.highlight?.text ?? [];
+  } catch (error) {
+    console.error('Unable to fetch remaining snippets:', error);
+    buttonEl.disabled = false;
+    buttonEl.textContent = originalLabel;
+    return;
+  }
+
+  if (token !== searchToken) return; // a newer search has since started; discard these results
+
+  // Skip past the snippets already on the page instead of re-rendering everything, in case
+  // fragment boundaries shifted slightly between the two requests.
+  const newSnippets = fragments.slice(displayedCount);
+  if (!newSnippets.length) {
+    buttonEl.remove();
+    return;
+  }
+
+  const listFragment = document.createDocumentFragment();
+  newSnippets.forEach((snippet) => {
+    const snippetEl = document.createElement('p');
+    snippetEl.className = 'result-snippet';
+    snippetEl.innerHTML = sanitizeHighlightFragment(snippet);
+    listFragment.appendChild(snippetEl);
+  });
+  buttonEl.before(listFragment);
+  buttonEl.remove();
 }
 
 function sortResults(results, sortKey) {
