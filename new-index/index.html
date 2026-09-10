@@ -117,11 +117,20 @@
             <p class="query-help">
               Elasticsearch syntax supported: AND, OR, NOT, parentheses,
               wildcards and fuzziness. Combine with structured filters such as
-              <code>person:</code>, <code>place:</code>,
-              <code>profession:</code>, <code>settlement:</code>,
+              <code>person:</code>, <code>personname:</code>,
+              <code>place:</code>, <code>profession:</code>,
+              <code>documenttype:</code>, <code>settlement:</code>,
               <code>inventory:</code> or <code>year:</code>. Wrap terms in
               <code>(...)~N</code> to find them within N words of each other,
               e.g. <code>(place:Amsterdam timmerman)~5</code>.
+            </p>
+
+            <p class="query-help query-tip">
+              Tip: while typing a filter's value, a single space keeps you
+              inside that same value — handy for multi-word names like
+              <code>personname:Jogem Hendrik</code> — and suggestions stay open.
+              A second space (or picking a suggestion) closes that filter and
+              starts a new term.
             </p>
 
             <div class="query-examples" aria-label="Example searches">
@@ -130,55 +139,167 @@
                 class="query-example"
                 href="results.html?q=timmerman"
                 title="Plain keyword search"
-                >timmerman</a
+                ><span class="query-freetext">timmerman</span></a
               >
               <a
                 class="query-example"
                 href="results.html?q=timmerman*"
                 title="Wildcard search"
-                >timmerman*</a
+                ><span class="query-freetext">timmerman*</span></a
               >
               <a
                 class="query-example"
                 href="results.html?q=timmerman~1"
                 title="Fuzzy search (edit distance 1)"
-                >timmerman~1</a
+                ><span class="query-freetext"
+                  >timmerman<span class="fuzzy-marker">~1</span></span
+                ></a
+              >
+              <a
+                class="query-example"
+                href="results.html?q=person%3Akoopman*"
+                title="Structured filter on a generic person annotation (occupation-inferred mentions)"
+                ><span class="query-chip is-inline" data-field="person"
+                  ><span class="field-name">person:</span
+                  ><span>koopman*</span></span
+                ></a
+              >
+              <a
+                class="query-example"
+                href="results.html?q=personname%3ASleuter"
+                title="Structured filter on a named individual — matches every recorded spelling variant"
+                ><span class="query-chip is-inline" data-field="personname"
+                  ><span class="field-name">personname:</span
+                  ><span>Sleuter</span></span
+                ></a
               >
               <a
                 class="query-example"
                 href="results.html?q=place%3AAmsterdam"
                 title="Structured filter on a place annotation"
-                >place:Amsterdam</a
+                ><span class="query-chip is-inline" data-field="place"
+                  ><span class="field-name">place:</span
+                  ><span>Amsterdam</span></span
+                ></a
+              >
+              <a
+                class="query-example"
+                href="results.html?q=profession%3Atimmerman"
+                title="Structured filter on a profession"
+                ><span class="query-chip is-inline" data-field="profession"
+                  ><span class="field-name">profession:</span
+                  ><span>timmerman</span></span
+                ></a
+              >
+              <a
+                class="query-example"
+                href="results.html?q=documenttype%3Abrief"
+                title="Structured filter on a document type"
+                ><span class="query-chip is-inline" data-field="documenttype"
+                  ><span class="field-name">documenttype:</span
+                  ><span>brief</span></span
+                ></a
+              >
+              <a
+                class="query-example"
+                href="results.html?q=settlement%3ABatavia"
+                title="Structured filter on a settlement"
+                ><span class="query-chip is-inline" data-field="settlement"
+                  ><span class="field-name">settlement:</span
+                  ><span>Batavia</span></span
+                ></a
+              >
+              <a
+                class="query-example"
+                href="results.html?q=inventory%3A1092*"
+                title="Structured filter on an inventory number (wildcard)"
+                ><span class="query-chip is-inline" data-field="inventory"
+                  ><span class="field-name">inventory:</span
+                  ><span>1092*</span></span
+                ></a
+              >
+              <a
+                class="query-example"
+                href="results.html?q=year%3A1680-1690"
+                title="Structured filter on a year range"
+                ><span class="query-chip is-inline" data-field="year"
+                  ><span class="field-name">year:</span
+                  ><span>1680-1690</span></span
+                ></a
               >
               <a
                 class="query-example"
                 href="results.html?q=place%3AAmsterdam%20AND%20profession%3Atimmerman"
                 title="Combine two structured filters"
-                >place:Amsterdam AND profession:timmerman</a
+                ><span class="query-chip is-inline" data-field="place"
+                  ><span class="field-name">place:</span
+                  ><span>Amsterdam</span></span
+                ><span class="query-connector">AND</span
+                ><span class="query-chip is-inline" data-field="profession"
+                  ><span class="field-name">profession:</span
+                  ><span>timmerman</span></span
+                ></a
               >
               <a
                 class="query-example"
                 href="results.html?q=(place%3AAmsterdam%20OR%20place%3ADeventer)%20NOT%20profession%3Akoopman"
                 title="Grouping with OR and excluding with NOT"
-                >(place:Amsterdam OR place:Deventer) NOT profession:koopman</a
+                ><span class="query-connector is-paren">(</span
+                ><span class="query-chip is-inline" data-field="place"
+                  ><span class="field-name">place:</span
+                  ><span>Amsterdam</span></span
+                ><span class="query-connector">OR</span
+                ><span class="query-chip is-inline" data-field="place"
+                  ><span class="field-name">place:</span
+                  ><span>Deventer</span></span
+                ><span class="query-connector is-paren">)</span
+                ><span class="query-connector">NOT</span
+                ><span class="query-chip is-inline" data-field="profession"
+                  ><span class="field-name">profession:</span
+                  ><span>koopman</span></span
+                ></a
               >
               <a
                 class="query-example"
                 href="results.html?q=(amsterdam%20timmerman)~5"
                 title="Proximity: two free-text words within 5 words of each other"
-                >(amsterdam timmerman)~5</a
+                ><span class="query-proxgroup"
+                  ><span class="query-connector is-paren">(</span
+                  ><span class="query-freetext">amsterdam</span
+                  ><span class="query-connector">near</span
+                  ><span class="query-freetext">timmerman</span
+                  ><span class="query-connector is-paren">)</span
+                  ><span class="proximity-slop">~5</span></span
+                ></a
               >
               <a
                 class="query-example"
                 href="results.html?q=(amsterdam~%20timmerman)~10"
                 title="Proximity with a fuzzy term"
-                >(amsterdam~ timmerman)~10</a
+                ><span class="query-proxgroup"
+                  ><span class="query-connector is-paren">(</span
+                  ><span class="query-freetext"
+                    >amsterdam<span class="fuzzy-marker">~</span></span
+                  ><span class="query-connector">near</span
+                  ><span class="query-freetext">timmerman</span
+                  ><span class="query-connector is-paren">)</span
+                  ><span class="proximity-slop">~10</span></span
+                ></a
               >
               <a
                 class="query-example"
                 href="results.html?q=(place%3AAmsterdam%20timmerman)~5"
                 title="Proximity between a structured place annotation and a free-text word"
-                >(place:Amsterdam timmerman)~5</a
+                ><span class="query-proxgroup"
+                  ><span class="query-connector is-paren">(</span
+                  ><span class="query-chip is-inline" data-field="place"
+                    ><span class="field-name">place:</span
+                    ><span>Amsterdam</span></span
+                  ><span class="query-connector">near</span
+                  ><span class="query-freetext">timmerman</span
+                  ><span class="query-connector is-paren">)</span
+                  ><span class="proximity-slop">~5</span></span
+                ></a
               >
             </div>
           </div>
