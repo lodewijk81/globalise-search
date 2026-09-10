@@ -228,8 +228,6 @@ function buildYearRangeClause(value) {
   };
 }
 
-// Returns { query, proximityGroups }: proximityGroups lists any (structural + free-text)
-// proximity groups that need backend refinement, see buildProximityClause below.
 // Result caps for the different suggestion strategies used below.
 const SUGGEST_AGG_FETCH_SIZE = 30; // nested/keyword fields: raw ES buckets fetched, before merging case variants.
 const SUGGEST_AGG_RESULT_SIZE = 10; // nested/keyword fields: how many merged, distinct values to keep.
@@ -491,18 +489,16 @@ function buildChipExtra(def, item) {
   return extra;
 }
 
-function buildEsQuery(keywordText, chips) {
-  const proximityGroups = [];
-  const expressionClause = parseKeywordExpression(keywordText, proximityGroups);
+async function buildEsQuery(keywordText, chips) {
+  const expressionClause = await parseKeywordExpression(keywordText);
   const filter = chips.map(chipToEsClause).filter(Boolean);
 
-  const query = {
+  return {
     bool: {
       ...(expressionClause ? { must: [expressionClause] } : {}),
       ...(filter.length ? { filter } : {}),
     },
   };
-  return { query, proximityGroups };
 }
 
 // --- Boolean query expression parser -----------------------------------------------------
@@ -653,53 +649,141 @@ function tokenizeQueryExpression(input) {
   return tokens;
 }
 
-// Builds the ES clause for a PROXGROUP token. Plain-word-only groups become a native
-// span_near query. Groups mixing in a structural field:value can't be expressed as a single
-// span query (span clauses must all target the same field, but annotations live in a separate
-// nested field), so we emit a coarse match/filter clause here and record the group in
-// `collector` so the backend can refine it using the stored annotation offsets.
-function buildProximityClause(group, collector) {
+// Builds a span clause for a single (already-lowercased) literal string: a span_term for one
+// word, or an in-order, zero-slop span_near of each word for a multi-word phrase.
+function phraseToSpanClause(phrase) {
+  const words = (phrase || '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return null;
+  if (words.length === 1) return { span_term: { text: words[0] } };
+  return { span_near: { clauses: words.map((word) => ({ span_term: { text: word } })), slop: 0, in_order: true } };
+}
+
+// Combines several literal spelling variants of the same real-world entity/concept (see
+// resolveObservanceVariants) into a single span clause matching ANY of them at that position.
+function variantsToSpanClause(variants) {
+  const clauses = variants.map(phraseToSpanClause).filter(Boolean);
+  if (!clauses.length) return null;
+  return clauses.length === 1 ? clauses[0] : { span_or: { clauses } };
+}
+
+// Which observances.type a field's values can be resolved against for proximity purposes —
+// i.e. where the literal, position-addressable spelling variants for that field's concept
+// actually live. "place" and "person" resolve against their own observance type directly.
+// "profession" hooks into the *generic* occupation-inferred Person observances instead of
+// professionLabelPaths (confirmed live: "timmerman" shares one id with "timmerlieden",
+// "Carpenter", "Zimmerman", OCR noise, and more) — the same annotation stream that backs the
+// plain person: field, just reached via a different typed value. Fields with no entry here
+// (documenttype, personname, settlement, inventory, year) have no such linkage available and
+// fall back to matching the literal typed value/phrase.
+const PROXIMITY_OBSERVANCE_TYPE = { person: 'Person', place: 'Place', profession: 'Person' };
+
+// For a field:value item inside a proximity group, looks up every literal spelling recorded
+// under the same shared observances.id as the typed value — two small aggregation queries:
+// first find the id for the typed label, then fetch every label recorded under that id. Falls
+// back to [value] if no id-linked variants are found (e.g. a typo with no exact match).
+async function resolveObservanceVariants(observanceType, value, signal) {
+  const trimmedValue = (value || '').trim();
+  if (!trimmedValue) return [];
+
+  const idFilter = [
+    { term: { 'observances.type': observanceType } },
+    { term: { 'observances.label': { value: trimmedValue, case_insensitive: true } } },
+  ];
+  const idBody = {
+    size: 0,
+    query: { nested: { path: 'observances', query: { bool: { filter: idFilter } } } },
+    aggs: {
+      obs: {
+        nested: { path: 'observances' },
+        aggs: {
+          filtered: {
+            filter: { bool: { filter: idFilter } },
+            aggs: { by_id: { terms: { field: 'observances.id', size: 1, order: { _count: 'desc' } } } },
+          },
+        },
+      },
+    },
+  };
+
+  try {
+    const idData = await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(idBody),
+      signal,
+    }).then((response) => (response.ok ? response.json() : null));
+    const resolvedId = idData?.aggregations?.obs?.filtered?.by_id?.buckets?.[0]?.key;
+    if (!resolvedId) return [trimmedValue];
+
+    const variantFilter = [
+      { term: { 'observances.type': observanceType } },
+      { term: { 'observances.id': resolvedId } },
+    ];
+    const variantsBody = {
+      size: 0,
+      query: { nested: { path: 'observances', query: { bool: { filter: variantFilter } } } },
+      aggs: {
+        obs: {
+          nested: { path: 'observances' },
+          aggs: {
+            filtered: {
+              filter: { bool: { filter: variantFilter } },
+              aggs: { by_label: { terms: { field: 'observances.label', size: 50 } } },
+            },
+          },
+        },
+      },
+    };
+    const variantsData = await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(variantsBody),
+      signal,
+    }).then((response) => (response.ok ? response.json() : null));
+    const buckets = variantsData?.aggregations?.obs?.filtered?.by_label?.buckets || [];
+    const variants = [...new Set(buckets.map((bucket) => bucket.key.toLowerCase()))];
+    return variants.length ? variants : [trimmedValue];
+  } catch (error) {
+    if (error.name === 'AbortError') throw error;
+    return [trimmedValue];
+  }
+}
+
+// Builds the span clause for a single item inside a proximity group. Plain words become a
+// span_term (or a fuzzy span_multi). A field:value item resolves to every known spelling
+// variant when PROXIMITY_OBSERVANCE_TYPE has an entry for that field (see above); otherwise it
+// falls back to matching the literal typed value/phrase, the same trade-off as before — span
+// queries only work within one flat, position-indexed field, so even a resolved variant list
+// is matched as literal text in `text`, not via the nested `observances` structure directly.
+async function proximityItemToSpanClause(item, signal) {
+  if (item.kind === 'word') {
+    const value = item.text.toLowerCase();
+    return item.fuzzy
+      ? { span_multi: { match: { fuzzy: { text: { value, fuzziness: item.fuzzy } } } } }
+      : { span_term: { text: value } };
+  }
+  const observanceType = PROXIMITY_OBSERVANCE_TYPE[item.fieldKey];
+  if (!observanceType) return phraseToSpanClause(item.value);
+  const variants = await resolveObservanceVariants(observanceType, item.value, signal);
+  return variantsToSpanClause(variants);
+}
+
+// Builds the ES clause for a PROXGROUP token as a single native span_near query, whether the
+// group is plain words, a mix of words and field:value items, or multiple field:value items.
+// Item resolutions run in parallel via Promise.all, so a group's total extra latency is
+// bounded by its single slowest resolution, not the number of items needing one.
+async function buildProximityClause(group, signal) {
   const items = group.items.filter((item) => (item.kind === 'word' ? item.text : item.value));
   if (items.length < 2) return null;
-  const hasField = items.some((item) => item.kind === 'field');
-
-  if (!hasField) {
-    const clauses = items.map((item) => {
-      const value = item.text.toLowerCase();
-      return item.fuzzy
-        ? { span_multi: { match: { fuzzy: { text: { value, fuzziness: item.fuzzy } } } } }
-        : { span_term: { text: value } };
-    });
-    return { span_near: { clauses, slop: group.slop, in_order: false } };
-  }
-
-  const mustClauses = items
-    .map((item) => {
-      if (item.kind === 'field') return chipToEsClause({ fieldKey: item.fieldKey, value: item.value });
-      return item.fuzzy
-        ? { fuzzy: { text: { value: item.text, fuzziness: item.fuzzy } } }
-        : { match: { text: item.text } };
-    })
-    .filter(Boolean);
-  if (!mustClauses.length) return null;
-
-  if (collector) {
-    collector.push({
-      slop: group.slop,
-      terms: items.map((item) =>
-        item.kind === 'field'
-          ? { type: 'field', fieldKey: item.fieldKey, value: item.value }
-          : { type: 'word', value: item.text, fuzzy: item.fuzzy }
-      ),
-    });
-  }
-
-  return { bool: { must: mustClauses } };
+  const clauses = (await Promise.all(items.map((item) => proximityItemToSpanClause(item, signal)))).filter(Boolean);
+  if (clauses.length < 2) return null;
+  return { span_near: { clauses, slop: group.slop, in_order: false } };
 }
 
 // Recursive-descent parser: orExpr := andExpr (OR andExpr)*, andExpr := notExpr (AND? notExpr)*.
-// `collector` gathers proximity groups that mix structural terms with free text (see above).
-function parseQueryTokens(tokens, collector) {
+// Async throughout because a PROXGROUP branch may need to resolve field values against the
+// server (see buildProximityClause) before its clause can be built.
+async function parseQueryTokens(tokens, signal) {
   let pos = 0;
   const peek = () => tokens[pos];
   const consume = () => tokens[pos++];
@@ -711,18 +795,18 @@ function parseQueryTokens(tokens, collector) {
     return text ? { query_string: { query: text, default_field: 'text', default_operator: 'AND' } } : null;
   }
 
-  function parsePrimary() {
+  async function parsePrimary() {
     const token = peek();
     if (!token) return null;
     if (token.type === 'LPAREN') {
       consume();
-      const inner = parseOr();
+      const inner = await parseOr();
       if (peek()?.type === 'RPAREN') consume();
       return inner;
     }
     if (token.type === 'PROXGROUP') {
       consume();
-      return buildProximityClause(token, collector);
+      return buildProximityClause(token, signal);
     }
     if (token.type === 'FIELDVALUE') {
       consume();
@@ -736,31 +820,31 @@ function parseQueryTokens(tokens, collector) {
     return null;
   }
 
-  function parseNot() {
+  async function parseNot() {
     if (peek()?.type === 'NOT') {
       consume();
-      const clause = parsePrimary();
+      const clause = await parsePrimary();
       return clause ? { bool: { must_not: [clause] } } : null;
     }
     return parsePrimary();
   }
 
-  function parseAnd() {
-    const clauses = [parseNot()].filter(Boolean);
+  async function parseAnd() {
+    const clauses = [await parseNot()].filter(Boolean);
     while (peek() && peek().type !== 'OR' && peek().type !== 'RPAREN') {
       if (peek().type === 'AND') consume();
-      const clause = parseNot();
+      const clause = await parseNot();
       if (clause) clauses.push(clause);
     }
     if (!clauses.length) return null;
     return clauses.length === 1 ? clauses[0] : { bool: { must: clauses } };
   }
 
-  function parseOr() {
-    const clauses = [parseAnd()].filter(Boolean);
+  async function parseOr() {
+    const clauses = [await parseAnd()].filter(Boolean);
     while (peek()?.type === 'OR') {
       consume();
-      const clause = parseAnd();
+      const clause = await parseAnd();
       if (clause) clauses.push(clause);
     }
     if (!clauses.length) return null;
@@ -771,14 +855,15 @@ function parseQueryTokens(tokens, collector) {
 }
 
 // Parses the whole keyword box into an ES query clause, supporting `field:value`, AND/OR/NOT,
-// parentheses and `(...)~N` proximity groups. Proximity groups that mix a structural field:value
-// with free text are also pushed onto `collector` for backend-side proximity refinement.
-function parseKeywordExpression(keywordText, collector) {
+// parentheses and `(...)~N` proximity groups (all built as native span_near queries). Async
+// because a proximity group mixing in a field:value may need to resolve it against the server
+// first (see resolveObservanceVariants) — `signal` lets that be aborted if the search changes.
+async function parseKeywordExpression(keywordText, signal) {
   const trimmed = (keywordText || '').trim();
   if (!trimmed) return null;
   try {
     const tokens = tokenizeQueryExpression(trimmed);
-    return tokens.length ? parseQueryTokens(tokens, collector) : null;
+    return tokens.length ? await parseQueryTokens(tokens, signal) : null;
   } catch (error) {
     console.error('Failed to parse query expression, falling back to plain text search', error);
     return { query_string: { query: trimmed, default_field: 'text', default_operator: 'AND' } };
@@ -1456,7 +1541,7 @@ async function search(keywordText, chips, page, sortKey = 'relevance') {
   updateQueryState(trimmedQuery, activeChips, page, sortKey);
 
   const from = (page - 1) * pageSize;
-  const { query, proximityGroups } = buildEsQuery(trimmedQuery, activeChips);
+  const query = await buildEsQuery(trimmedQuery, activeChips);
   const payload = {
     from,
     size: pageSize,
@@ -1470,11 +1555,6 @@ async function search(keywordText, chips, page, sortKey = 'relevance') {
     },
     sort: ['_score'],
   };
-  // Structural+free-text proximity groups (e.g. (place:Amsterdam timmerman)~5) can't be
-  // expressed as a native ES query, so the proxy re-checks true word distance using this.
-  if (proximityGroups.length) {
-    payload.proximity = proximityGroups;
-  }
 
   if (statusContainer) {
     statusContainer.textContent = 'Searching…';
