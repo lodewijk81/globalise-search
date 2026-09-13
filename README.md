@@ -28,6 +28,10 @@ prototypes.
 - (`new-index/` only) supports structured filters, boolean/proximity query syntax, and
   suggestion-driven filter chips backed by the corpus's people/place/profession
   annotations
+- (`new-index/` only) shows an exact match count per document once resolved, with a
+  "Show N more matches" button to fetch and display every remaining snippet for that one
+  document on demand (not for the whole result set — see "Highlighting, match counts,
+  and 'show more'" below)
 
 ## Query syntax (new-index frontend)
 
@@ -147,9 +151,56 @@ of (up to) 10 fetched results — see "Known limitations" below for what this me
 practice. Each result's viewer link and thumbnail are built from a IIIF manifest fetched
 per-document from `data.globalise.huygens.knaw.nl`, pointing into the `dev.globalise.nl`
 viewer; documents spanning multiple scans are linked to their first scan only. Highlighted
-snippets come from Elasticsearch's `highlight` on the `text` field; for structural-only
-queries (e.g. `person:` with no free text) nothing gets highlighted, so the UI falls back
-to a plain excerpt of the document text.
+snippets come from Elasticsearch's `highlight` on the `text` field — see "Highlighting,
+match counts, and 'show more'" below for how this now also works for structural-only
+queries (e.g. `person:` with no free text).
+
+### Highlighting, match counts, and "show more"
+
+Each result initially requests up to `FRAGMENT_CAP` (3) highlighted fragments of `text`.
+If a result's fragment count comes back below the cap, that's already the exact count. If
+it comes back exactly at the cap, the true count might be higher, so a separate, scoped
+follow-up request (`fetchExactMatchCounts`) re-runs the same query filtered to just that
+one document with `number_of_fragments: 0`, counts the `<mark>` tags in the full
+highlighted field, and patches the badge in place. If that exact count is higher than
+what's displayed, a "Show N more matches" button appears; clicking it
+(`loadRemainingSnippets`) fetches and appends the rest of that document's snippets. This
+is always scoped to the one document the button belongs to — a user wanting every
+snippet across several matching documents has to click through this separately for each
+one.
+
+This only works at all because `text` is where the highlighter looks. Structured filters
+like `place:`, `person:`, and `profession:` — whether added as a chip or typed inline —
+match against a completely different field (`observances`, or a label-path field), so by
+default there'd be nothing on `text` to highlight or count. `buildEsQuery` works around
+this by building a second, separate `highlightQuery` (sent as
+`highlight.fields.text.highlight_query`, which overrides Elasticsearch's default of
+highlighting whatever the main query matched) purely to tell Elasticsearch what to look
+for in `text`:
+
+- **`place`, `person`, `profession`** (via `PROXIMITY_OBSERVANCE_TYPE`, the same mapping
+  proximity groups use): resolves the shared `observances.id` behind the typed/selected
+  value, then looks up every corpus-recorded spelling variant under that id (see
+  `resolveObservanceVariants` / `fetchObservanceLabelVariantsById`) and highlights
+  against all of them. This is necessary, not cosmetic: chips filter these fields by
+  entity id specifically *because* the literal spelling actually present in any given
+  document's OCR text is often a different recorded variant than the canonical
+  suggestion label (e.g. the "Amsterdam" entity may appear in a given document's text as
+  "amsterdam", "amsterd:m", or another OCR-mangled form).
+- **`documenttype`, `settlement`, `inventory`**: no such shared-id/variant source exists,
+  so highlighting/counting falls back to matching the literal filter value itself against
+  `text`. This means a document can correctly match the filter yet still show no
+  highlighted snippets or match count, if that exact word never occurs in the OCR text —
+  which is common, since these are archival classifications rather than words the
+  document necessarily contains. This is a data-model gap, not a bug; see "Known
+  limitations" and "Suggested future improvements".
+- **`year`**: never highlighted — a date range has no literal phrase to search for.
+- **Free-text keyword expressions**: word runs and proximity groups already target
+  `text` directly, so they highlight correctly without any of the above. A `field:value`
+  typed directly into the keyword box (rather than added as a chip) goes through the same
+  resolution as a chip would, via a second parse of the same keyword text with the
+  highlight-specific resolver substituted in (see `chipToHighlightClause` and its use in
+  `buildEsQuery`).
 
 ## Known limitations
 
@@ -170,6 +221,17 @@ to a plain excerpt of the document text.
 - **Proximity groups that mix in a `person:`/`place:`/`profession:` term add extra
   round-trips.** Each such item needs two sequential aggregation queries to resolve its
   spelling variants before the main search can run.
+- **So does highlighting the same three fields outside a proximity group.** Any `place:`,
+  `person:`, or `profession:` term — chip or typed inline — triggers the same
+  variant-resolution lookups purely to build the highlight query (see "Highlighting,
+  match counts, and 'show more'" above), and they're re-run on every pagination/sort
+  click for the same query rather than cached for the session.
+- **`documenttype:`, `settlement:`, `inventory:`, and `year:` can under-report or hide
+  match counts entirely**, even for documents that genuinely match the filter. Unlike
+  `person`/`place`/`profession`, these fields have no shared entity id linking a filter
+  value to its recorded spelling variants, so highlighting/counting falls back to a
+  literal match against the free-text body — which these archival-classification fields
+  often don't literally contain. See "Suggested future improvements" below.
 - **Parser fallback is silent.** If the boolean/proximity expression fails to parse, the
   raw text is quietly resubmitted as a plain `query_string` query with no indication to
   the user that their structured syntax wasn't understood.
@@ -178,6 +240,22 @@ to a plain excerpt of the document text.
 
 ## Suggested future improvements
 
+- **Give `documenttype`, `settlement`, and `inventory` a shared entity id, the same way
+  `person`/`place` observations already have one**, linking each value to every recorded
+  spelling/notation variant seen for it. This is the real fix for the highlighting/count
+  gap described above and in "Known limitations": it would let `chipToHighlightClause`
+  resolve spelling variants for these fields exactly the way it already does for
+  `person`/`place`/`profession`, instead of only trying the literal filter value.
+- **Record each `observances` mention with its exact offset (or a short surrounding
+  excerpt) at annotation time**, rather than only `type`/`id`/`label`. This would let a
+  document's match count and "show more" snippets for `place`/`person`/`profession` come
+  directly from the annotation data — exact per document, with no cap — instead of being
+  reconstructed indirectly via literal-text highlighting, which is inherently limited to
+  whichever spelling variants a corpus-wide aggregation happens to surface (currently
+  capped at the top 50 by frequency) and can still miss a rare variant.
+- **Cache resolved observance-id/spelling-variant lookups for the session** (e.g. keyed
+  by field + typed value, or by resolved id), so repeated pagination or sort-order
+  changes on the same structural query don't re-issue the same aggregation queries.
 - Enable server-side aggregation (e.g. `fielddata: true`, or a keyword sub-field) on
   `professionLabelPaths.tree` / `documentTypeLabelPaths.tree` so profession/document-type
   suggestions get exact, corpus-wide counts instead of a sampled approximation.
