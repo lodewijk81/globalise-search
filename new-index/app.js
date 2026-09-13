@@ -212,6 +212,61 @@ function chipToEsClause(chip) {
   return null;
 }
 
+// Returns a "text"-field match clause for HIGHLIGHTING only — never used to filter documents
+// (chipToEsClause above remains the sole source of truth for that). Structural chips like place:
+// or profession: filter on a completely different field under the hood (observances,
+// professionLabelPaths, ...), so without this there'd be no query clause touching "text" at all
+// for a structural-only search, and getHighlightInfo would always fall back to a plain excerpt
+// with no match count.
+//
+// Naively match_phrase-ing the chip's own value against "text" mostly doesn't work: that value
+// is a single canonical label (e.g. "Amsterdam"), but chipToEsClause deliberately filters place/
+// person/profession by a shared observances.id specifically *because* the literal spelling
+// actually present in any given document's OCR text is often a completely different recorded
+// variant (confirmed live: "Amsterdam", "amsterdam" and OCR-mangled "amsterd.m" all share one
+// id — see chipToEsClause's nested branch). So for those three fields this looks up every
+// spelling variant on record for that shared id (via PROXIMITY_OBSERVANCE_TYPE, the same linkage
+// the proximity-group feature already uses — see resolveObservanceVariants) and matches any of
+// them, the same way personname chips already match every one of their own known variants.
+// personname itself, and fields with no such linkage (documenttype, settlement, inventory), fall
+// back to matching the chip's own literal value/variants directly.
+// Returns null where there's no literal phrase to highlight at all: a year chip is a date range,
+// and an explicit wildcard pattern (e.g. "am*") isn't a phrase match_phrase could use.
+async function chipToHighlightClause(chip, signal) {
+  const def = FIELD_BY_KEY.get(chip.fieldKey);
+  const value = (chip.value || '').trim();
+  if (!def || !value) return null;
+  if (def.kind === 'year') return null;
+  if (hasExplicitWildcard(value)) return null;
+
+  // Hierarchical profession/documenttype values are stored "|"-joined by level (e.g.
+  // "Ambachtslieden|timmerman"); observances.label and the body text only ever hold the leaf.
+  const literal = def.kind === 'text' && value.includes('|') ? value.split('|').pop().trim() : value;
+  if (!literal) return null;
+
+  const observanceType = PROXIMITY_OBSERVANCE_TYPE[chip.fieldKey];
+  if (observanceType) {
+    const variants = chip.resolvedId
+      ? await fetchObservanceLabelVariantsById(observanceType, chip.resolvedId, signal)
+      : await resolveObservanceVariants(observanceType, literal, signal);
+    const usable = variants.length ? variants : [literal];
+    return {
+      bool: {
+        should: usable.map((variant) => ({ match_phrase: { text: variant } })),
+        minimum_should_match: 1,
+      },
+    };
+  }
+
+  const variants = chip.variants && chip.variants.length ? chip.variants : [literal];
+  return {
+    bool: {
+      should: variants.map((variant) => ({ match_phrase: { text: variant } })),
+      minimum_should_match: 1,
+    },
+  };
+}
+
 function buildYearRangeClause(value) {
   const rangeMatch = value.match(/^(\d{3,4})\s*-\s*(\d{3,4})$/);
   const singleMatch = value.match(/^(\d{3,4})$/);
@@ -497,16 +552,50 @@ function buildChipExtra(def, item) {
   return extra;
 }
 
+// Returns { query, highlightQuery }. `query` is the actual filter/relevance query, unchanged in
+// shape from before. `highlightQuery` is a separate query used only to tell Elasticsearch what to
+// highlight in the "text" field (via highlight.fields.text.highlight_query) — built from the
+// free-text keyword expression (if any) plus a highlight clause for every chip that has one (see
+// chipToHighlightClause, which for place/person/profession chips resolves real corpus spelling
+// variants via a couple of small aggregation queries, so this does real network work, not just
+// local query-shape assembly). These need to be separate from `query`: it deliberately matches
+// structural chips like place: or profession: against a different field entirely (for reasons
+// explained on chipToEsClause), so relying on it alone for highlighting would leave "text" with
+// no matching clause and nothing to highlight or count whenever the search has no keyword and no
+// personname chip. `highlightQuery` is null when there's truly nothing to highlight (e.g. a bare
+// year: chip).
 async function buildEsQuery(keywordText, chips) {
   const expressionClause = await parseKeywordExpression(keywordText);
   const filter = chips.map(chipToEsClause).filter(Boolean);
 
-  return {
+  const query = {
     bool: {
       ...(expressionClause ? { must: [expressionClause] } : {}),
       ...(filter.length ? { filter } : {}),
     },
   };
+
+  // A field:value typed directly into the keyword box (e.g. "documenttype:brief" or
+  // "place:Amsterdam") is parsed by the SAME recursive-descent parser as chips are, via
+  // parseKeywordExpression — so `expressionClause` above can itself be (or contain) a raw
+  // chipToEsClause-shaped filter clause against documentTypeLabelPaths/observances/etc., not
+  // "text". Re-parsing the identical keyword text with chipToHighlightClause substituted in for
+  // FIELDVALUE tokens fixes that: WORD runs and proximity groups parse to the exact same clause
+  // either way (they already target "text" natively), so this only changes what a typed
+  // field:value term contributes.
+  const highlightExpressionClause = await parseKeywordExpression(keywordText, undefined, chipToHighlightClause);
+  const chipHighlightClauses = (await Promise.all(chips.map((chip) => chipToHighlightClause(chip)))).filter(Boolean);
+  const highlightClauses = [
+    ...(highlightExpressionClause ? [highlightExpressionClause] : []),
+    ...chipHighlightClauses,
+  ];
+  const highlightQuery = highlightClauses.length
+    ? highlightClauses.length === 1
+      ? highlightClauses[0]
+      : { bool: { should: highlightClauses, minimum_should_match: 1 } }
+    : null;
+
+  return { query, highlightQuery };
 }
 
 // --- Boolean query expression parser -----------------------------------------------------
@@ -686,9 +775,9 @@ function variantsToSpanClause(variants) {
 const PROXIMITY_OBSERVANCE_TYPE = { person: 'Person', place: 'Place', profession: 'Person' };
 
 // For a field:value item inside a proximity group, looks up every literal spelling recorded
-// under the same shared observances.id as the typed value — two small aggregation queries:
-// first find the id for the typed label, then fetch every label recorded under that id. Falls
-// back to [value] if no id-linked variants are found (e.g. a typo with no exact match).
+// under the same shared observances.id as the typed value: first find the id for the typed
+// label, then fetch every label recorded under that id (see fetchObservanceLabelVariantsById).
+// Falls back to [value] if no id-linked variants are found (e.g. a typo with no exact match).
 async function resolveObservanceVariants(observanceType, value, signal) {
   const trimmedValue = (value || '').trim();
   if (!trimmedValue) return [];
@@ -714,46 +803,71 @@ async function resolveObservanceVariants(observanceType, value, signal) {
   };
 
   try {
-    const idData = await fetch(API_URL, {
+    const idResponse = await fetch(API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(idBody),
       signal,
-    }).then((response) => (response.ok ? response.json() : null));
+    });
+    if (!idResponse.ok) {
+      console.error(`Observance id lookup failed with status ${idResponse.status} for`, { observanceType, value: trimmedValue });
+      return [trimmedValue];
+    }
+    const idData = await idResponse.json();
     const resolvedId = idData?.aggregations?.obs?.filtered?.by_id?.buckets?.[0]?.key;
     if (!resolvedId) return [trimmedValue];
 
-    const variantFilter = [
-      { term: { 'observances.type': observanceType } },
-      { term: { 'observances.id': resolvedId } },
-    ];
-    const variantsBody = {
-      size: 0,
-      query: { nested: { path: 'observances', query: { bool: { filter: variantFilter } } } },
-      aggs: {
-        obs: {
-          nested: { path: 'observances' },
-          aggs: {
-            filtered: {
-              filter: { bool: { filter: variantFilter } },
-              aggs: { by_label: { terms: { field: 'observances.label', size: 50 } } },
-            },
+    const variants = await fetchObservanceLabelVariantsById(observanceType, resolvedId, signal);
+    return variants.length ? variants : [trimmedValue];
+  } catch (error) {
+    if (error.name === 'AbortError') throw error;
+    console.error('Observance id lookup threw for', { observanceType, value: trimmedValue }, error);
+    return [trimmedValue];
+  }
+}
+
+// Fetches every literal spelling recorded under one already-known observances.id (e.g.
+// "GLOB2_937") — the second half of resolveObservanceVariants' two-step lookup, split out so
+// callers that already have a resolvedId (chips picked from a suggestion always do) can skip
+// straight to this and avoid the redundant first query that re-resolves an id we already have.
+async function fetchObservanceLabelVariantsById(observanceType, resolvedId, signal) {
+  const variantFilter = [
+    { term: { 'observances.type': observanceType } },
+    { term: { 'observances.id': resolvedId } },
+  ];
+  const variantsBody = {
+    size: 0,
+    query: { nested: { path: 'observances', query: { bool: { filter: variantFilter } } } },
+    aggs: {
+      obs: {
+        nested: { path: 'observances' },
+        aggs: {
+          filtered: {
+            filter: { bool: { filter: variantFilter } },
+            aggs: { by_label: { terms: { field: 'observances.label', size: 50 } } },
           },
         },
       },
-    };
-    const variantsData = await fetch(API_URL, {
+    },
+  };
+  try {
+    const variantsResponse = await fetch(API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(variantsBody),
       signal,
-    }).then((response) => (response.ok ? response.json() : null));
+    });
+    if (!variantsResponse.ok) {
+      console.error(`Observance variants lookup failed with status ${variantsResponse.status} for`, { observanceType, resolvedId });
+      return [];
+    }
+    const variantsData = await variantsResponse.json();
     const buckets = variantsData?.aggregations?.obs?.filtered?.by_label?.buckets || [];
-    const variants = [...new Set(buckets.map((bucket) => bucket.key.toLowerCase()))];
-    return variants.length ? variants : [trimmedValue];
+    return [...new Set(buckets.map((bucket) => bucket.key.toLowerCase()))];
   } catch (error) {
     if (error.name === 'AbortError') throw error;
-    return [trimmedValue];
+    console.error('Observance variants lookup threw for', { observanceType, resolvedId }, error);
+    return [];
   }
 }
 
@@ -791,7 +905,11 @@ async function buildProximityClause(group, signal) {
 // Recursive-descent parser: orExpr := andExpr (OR andExpr)*, andExpr := notExpr (AND? notExpr)*.
 // Async throughout because a PROXGROUP branch may need to resolve field values against the
 // server (see buildProximityClause) before its clause can be built.
-async function parseQueryTokens(tokens, signal) {
+// `fieldValueResolver` builds the clause for a standalone FIELDVALUE token (a typed "field:value"
+// outside a proximity group) — defaults to chipToEsClause (the real filtering clause). buildEsQuery
+// below re-parses the same tokens a second time with chipToHighlightClause instead, to get a
+// highlighting-equivalent clause for typed field:value terms; see the comment there for why.
+async function parseQueryTokens(tokens, signal, fieldValueResolver = chipToEsClause) {
   let pos = 0;
   const peek = () => tokens[pos];
   const consume = () => tokens[pos++];
@@ -818,7 +936,7 @@ async function parseQueryTokens(tokens, signal) {
     }
     if (token.type === 'FIELDVALUE') {
       consume();
-      return chipToEsClause({ fieldKey: token.fieldKey, value: token.value });
+      return fieldValueResolver({ fieldKey: token.fieldKey, value: token.value });
     }
     if (token.type === 'WORD') {
       return parseWordRun();
@@ -866,12 +984,12 @@ async function parseQueryTokens(tokens, signal) {
 // parentheses and `(...)~N` proximity groups (all built as native span_near queries). Async
 // because a proximity group mixing in a field:value may need to resolve it against the server
 // first (see resolveObservanceVariants) — `signal` lets that be aborted if the search changes.
-async function parseKeywordExpression(keywordText, signal) {
+async function parseKeywordExpression(keywordText, signal, fieldValueResolver = chipToEsClause) {
   const trimmed = (keywordText || '').trim();
   if (!trimmed) return null;
   try {
     const tokens = tokenizeQueryExpression(trimmed);
-    return tokens.length ? await parseQueryTokens(tokens, signal) : null;
+    return tokens.length ? await parseQueryTokens(tokens, signal, fieldValueResolver) : null;
   } catch (error) {
     console.error('Failed to parse query expression, falling back to plain text search', error);
     return { query_string: { query: trimmed, default_field: 'text', default_operator: 'AND' } };
@@ -1526,8 +1644,11 @@ function getHighlightInfo(result) {
     };
   }
 
-  // Structural-only searches (person:/place:/etc.) don't match anything in the "text" field,
-  // so Elasticsearch has nothing to highlight. Fall back to a plain excerpt of the document text.
+  // Most structural-only searches (place:/profession:/etc.) do have something to highlight here,
+  // via the highlight_query built in buildEsQuery from each chip's literal-phrase equivalent (see
+  // chipToHighlightClause). This only falls through for searches with genuinely no literal phrase
+  // to highlight at all — e.g. a bare year: range, or a chip using an explicit wildcard pattern
+  // like "am*". Fall back to a plain excerpt of the document text in that case.
   const fullText = (result?.text || '').replace(/\s+/g, ' ').trim();
   if (!fullText) return { matchCount: 0, snippets: ['No snippet available.'], isExact: true };
   const excerpt = fullText.length > 300 ? `${fullText.slice(0, 300)}…` : fullText;
@@ -1574,7 +1695,7 @@ function renderSnippetList(snippets, moreId) {
 // counted. Deliberately NOT done for every result on the page: documents in this corpus can be
 // very long, and fully highlighting all of them on every page load would be slow and wasteful
 // when, for most results, the capped fragment count is already exact.
-async function fetchExactMatchCounts(pendingItems, esQuery, token) {
+async function fetchExactMatchCounts(pendingItems, esQuery, highlightQuery, token) {
   if (!pendingItems.length) return;
 
   const ndjsonLines = [];
@@ -1593,7 +1714,12 @@ async function fetchExactMatchCounts(pendingItems, esQuery, token) {
         highlight: {
           pre_tags: ['<mark>'],
           post_tags: ['</mark>'],
-          fields: { text: { number_of_fragments: 0 } },
+          fields: {
+            text: {
+              number_of_fragments: 0,
+              ...(highlightQuery ? { highlight_query: highlightQuery } : {}),
+            },
+          },
         },
       })
     );
@@ -1642,7 +1768,7 @@ async function fetchExactMatchCounts(pendingItems, esQuery, token) {
       // the remaining snippets have been fetched and appended.
       moreEl.addEventListener(
         'click',
-        () => loadRemainingSnippets(id, esQuery, moreEl, displayedCount, matchCount, token),
+        () => loadRemainingSnippets(id, esQuery, highlightQuery, moreEl, displayedCount, matchCount, token),
         { once: true }
       );
     }
@@ -1655,7 +1781,7 @@ async function fetchExactMatchCounts(pendingItems, esQuery, token) {
 // belongs to, via the same `ids` filter and re-run query used by fetchExactMatchCounts above. A
 // user wanting every snippet across several matching documents has to click through this
 // separately for each one; there's no "show all" affordance that fans this out across the page.
-async function loadRemainingSnippets(id, esQuery, buttonEl, displayedCount, totalCount, token) {
+async function loadRemainingSnippets(id, esQuery, highlightQuery, buttonEl, displayedCount, totalCount, token) {
   const originalLabel = buttonEl.textContent;
   buttonEl.disabled = true;
   buttonEl.textContent = 'Loading…';
@@ -1680,7 +1806,16 @@ async function loadRemainingSnippets(id, esQuery, buttonEl, displayedCount, tota
           // Requesting exactly the already-known exact total (rather than 0, which highlights
           // the whole field as one unbroken string) gets every match back pre-cut into the same
           // kind of bite-sized, contextual fragments as the initial search response.
-          fields: { text: { fragment_size: 150, number_of_fragments: totalCount } },
+          // Same highlight_query override as the main search and fetchExactMatchCounts, for the
+          // same reason: without it, a structural-only search has nothing matching "text" to
+          // highlight, so this would come back empty for exactly the case this whole fix targets.
+          fields: {
+            text: {
+              fragment_size: 150,
+              number_of_fragments: totalCount,
+              ...(highlightQuery ? { highlight_query: highlightQuery } : {}),
+            },
+          },
         },
       }),
     });
@@ -1773,7 +1908,7 @@ async function search(keywordText, chips, page, sortKey = 'relevance') {
 
   const token = ++searchToken;
   const from = (page - 1) * pageSize;
-  const query = await buildEsQuery(trimmedQuery, activeChips);
+  const { query, highlightQuery } = await buildEsQuery(trimmedQuery, activeChips);
   const payload = {
     from,
     size: pageSize,
@@ -1788,7 +1923,16 @@ async function search(keywordText, chips, page, sortKey = 'relevance') {
         // when a result hit the cap (FRAGMENT_CAP) and, for just those ambiguous results,
         // fetchExactMatchCounts makes a separate, scoped, single-document request to get the
         // real count without paying that cost for every result on the page.
-        text: { fragment_size: 150, number_of_fragments: FRAGMENT_CAP },
+        // highlight_query overrides ES's default of highlighting whatever the main `query`
+        // matched, which is necessary here: structural chips like place: or profession: filter
+        // `query` against a different field entirely, so without this override a structural-only
+        // search would have nothing matching "text" to highlight at all. Omitted entirely when
+        // there's truly nothing to highlight (e.g. a bare year: chip), matching ES's own default.
+        text: {
+          fragment_size: 150,
+          number_of_fragments: FRAGMENT_CAP,
+          ...(highlightQuery ? { highlight_query: highlightQuery } : {}),
+        },
       },
     },
     sort: ['_score'],
@@ -1827,7 +1971,7 @@ async function search(keywordText, chips, page, sortKey = 'relevance') {
     // Deliberately not awaited: the page is already rendered with provisional "N+ matches"
     // badges (see FRAGMENT_CAP below), and this only refines the handful of results that hit
     // the cap. No reason to make the user wait on it.
-    fetchExactMatchCounts(pendingExactCounts, query, token);
+    fetchExactMatchCounts(pendingExactCounts, query, highlightQuery, token);
   } catch (error) {
     console.error(error);
     if (statusContainer) {
