@@ -10,15 +10,25 @@ neither of which can live on the static GitHub Pages site.
 
 ## Setup
 
+Requirements: Python 3.10+, about 2.5 GB of free disk space, and an API key for at least one
+provider (Anthropic and/or Scaleway).
+
+1. **Get the Word2Vec model.** Download `GLOBALISE.word2vec.zip` (645 MB) from the
+   [GLOBALISE Word2Vec Lab](https://lab.globalise.huygens.knaw.nl/) download link
+   (<https://surfdrive.surf.nl/files/index.php/s/XmUIlsy33vpRdCX>) and unzip it anywhere. You
+   need the file `GLOBALISE_100.word2vec` (about 1.6 GB, plain-text word2vec format, 100
+   dimensions).
+2. **Install and configure:**
+
 ```bash
 cd new-index/nl
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-cp .env.example .env        # then fill in ANTHROPIC_API_KEY and WORD2VEC_PATH
+cp .env.example .env        # then fill in your API key(s) and WORD2VEC_PATH
 .venv/bin/python server.py
 ```
 
-Then open <http://localhost:5055/>. The first start converts the 1.7 GB text model to gensim's
+Then open <http://localhost:5055/>. The first start converts the 1.6 GB text model to gensim's
 format in `.cache/`, which takes about a minute. After that the model loads in seconds.
 
 ## How it works
@@ -54,8 +64,7 @@ logged with the model it used. Models whose API key is missing are shown but dis
 | Claude Sonnet 5.5 | Anthropic | Faster and cheaper |
 | Qwen3.5 397B | Scaleway | Recommended open-weight alternative: large and strongly multilingual |
 | GLM-5.2 | Scaleway | Scaleway's strongest open-weight model for agentic work; mainly trained on English/Chinese |
-| Mistral Medium 3.5 | Scaleway | European model |
-| DeepSeek V4 Flash | Scaleway | Cheapest of the four |
+| DeepSeek V4 Flash | Scaleway | Cheapest of the three |
 
 Scaleway's Generative APIs are OpenAI-compatible (`https://api.scaleway.ai/v1`). Those models give
 their final answer by calling a `submit_answer` tool rather than through a response format,

@@ -207,7 +207,6 @@ MODELS = {
     "claude-sonnet-5-5": {"label": "Claude Sonnet 5.5", "provider": "anthropic", "effort": "medium"},
     "qwen3.5-397b-a17b": {"label": "Qwen3.5 397B (Scaleway)", "provider": "scaleway", "effort": "medium"},
     "glm-5.2": {"label": "GLM-5.2 (Scaleway)", "provider": "scaleway", "effort": "high"},
-    "mistral-medium-3.5-128b": {"label": "Mistral Medium 3.5 (Scaleway)", "provider": "scaleway", "effort": "high"},
     "deepseek-v4-flash-0731": {"label": "DeepSeek V4 Flash (Scaleway)", "provider": "scaleway", "effort": "high"},
 }
 
