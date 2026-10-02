@@ -423,3 +423,7 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Natural-language search experiment (new-index/nl)
+new-index/nl/.venv/
+new-index/nl/logs/

@@ -1,0 +1,248 @@
+/* Natural-language search experiment. Builds on ../../styles.css (the new-index look):
+   only what that stylesheet doesn't already cover lives here. */
+
+.hero-copy-block h1 {
+  font-size: clamp(2.6rem, 4.5vw, 5rem);
+}
+
+.landing-search-form .query-builder input::placeholder {
+  color: rgba(255, 255, 255, 0.45);
+  text-align: center;
+}
+
+.landing-search-form > button:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+.nl-model-row {
+  margin-top: 14px;
+  font-size: 0.9rem;
+}
+
+.nl-model-row select {
+  padding: 7px 12px;
+}
+
+.nl-model-row option:disabled {
+  color: rgba(255, 255, 255, 0.35);
+}
+
+/* The example questions are sentences, not query syntax: drop the monospace look. */
+.query-example.nl-example {
+  font-family: var(--font-sans);
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+}
+
+.nl-status {
+  margin: 24px 0 0;
+  min-height: 1.5em;
+  text-align: center;
+}
+
+.nl-status.is-error {
+  color: var(--brand-vermilion);
+}
+
+.nl-result {
+  margin-top: 28px;
+}
+
+.nl-interpretation {
+  border-left: 2px solid var(--brand-parchment);
+  padding: 2px 0 2px 18px;
+  margin: 0 0 22px;
+  font-family: var(--font-serif);
+  font-size: 1.15rem;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.nl-interpretation p {
+  margin: 0;
+}
+
+.nl-notes {
+  margin-top: 8px !important;
+  font-family: var(--font-sans);
+  font-size: 0.92rem;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* The generated search, drawn with the same chip/connector vocabulary as the search bar. */
+.nl-query-card {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 20px 22px;
+  margin-bottom: 22px;
+}
+
+.nl-query-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px 16px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.nl-query-head .eyebrow {
+  margin: 0;
+}
+
+.nl-query-hint {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 0.85rem;
+}
+
+.nl-query {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 8px;
+}
+
+.nl-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.nl-group-label {
+  color: var(--brand-parchment);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-right: 2px;
+}
+
+.nl-term {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  padding: 4px 11px;
+  color: var(--brand-white);
+  font-size: 0.86rem;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+}
+
+.nl-term:hover {
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.nl-term[aria-pressed="false"] {
+  opacity: 0.45;
+  text-decoration: line-through;
+  background: transparent;
+}
+
+.nl-term .count {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.nl-term .count.is-zero {
+  color: var(--brand-vermilion);
+}
+
+.nl-add-term {
+  width: 7.5em;
+  background: transparent;
+  border: 1px dashed rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  padding: 4px 11px;
+  color: var(--brand-white);
+  font-size: 0.84rem;
+}
+
+.nl-add-term::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.nl-add-term:focus {
+  outline: 2px solid rgba(41, 191, 204, 0.8);
+  outline-offset: 1px;
+}
+
+.results-toolbar .status-text strong {
+  font-size: 1.3rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.nl-open {
+  border-radius: 999px;
+  background: var(--brand-vermilion);
+  color: var(--brand-black);
+  padding: 12px 20px;
+  font-weight: 700;
+  text-decoration: none;
+  transition: opacity 0.2s ease;
+}
+
+.nl-open:hover {
+  opacity: 0.94;
+}
+
+.nl-trace {
+  margin-top: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.02);
+  padding: 16px 22px;
+  font-size: 0.86rem;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.nl-trace summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--brand-white);
+}
+
+.nl-usage {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.nl-trace ol {
+  padding-left: 1.4em;
+}
+
+.nl-trace li + li {
+  margin-top: 8px;
+}
+
+.nl-trace code {
+  color: var(--brand-turquoise);
+}
+
+.nl-trace pre {
+  max-height: 260px;
+  overflow: auto;
+  background: var(--brand-black);
+  padding: 10px;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 760px) {
+  .landing-search-form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .hero-panel {
+    padding: 36px 18px 28px;
+  }
+}

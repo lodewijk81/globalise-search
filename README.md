@@ -269,6 +269,14 @@ for in `text`:
   depends on it.
 - Add a user-facing toggle for sort direction.
 
+## Natural-language search experiment (`new-index/nl/`)
+
+An experimental page where a question in English or Dutch is translated by an LLM into a
+search on the new index. The LLM grounds its terms in the corpus through a Word2Vec model and
+live document counts. It needs a local Python server (an API key and the Word2Vec model can't
+live on GitHub Pages), so it runs locally only. See
+[`new-index/nl/README.md`](new-index/nl/README.md).
+
 ## Local development
 
 Both frontends are static sites and can be served locally with any static file server.
