@@ -269,6 +269,12 @@ for in `text`:
   depends on it.
 - Add a user-facing toggle for sort direction.
 
+## Search everything (`unified/`)
+
+A single search across the annotated documents, persons, places, organisations, polities,
+ships and the thesaurus at `https://search.globalise.nl`. See
+[`unified/README.md`](unified/README.md).
+
 ## Natural-language search experiment (`new-index/nl/`)
 
 An experimental page where a question in English or Dutch is translated by an LLM into a
