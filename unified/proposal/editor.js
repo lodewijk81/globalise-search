@@ -98,7 +98,7 @@ const pillPlugin = ViewPlugin.fromClass(
 
 // --- Syntax highlighting ------------------------------------------------------------------
 
-const SYNTAX = /(@\{[^}]*\})|("[^"]*"?)|(?<![\w])(NOT\s+IN|AND|OR|NOT|IN)(?![\w])|([A-Za-z]+)\s*:|([()])|(~\d*)|([*?])/g;
+const SYNTAX = /(@\{[^}]*\})|("[^"]*"?)|(?<![\w])(NOT\s+IN|AND|OR|NOT)(?![\w])|([A-Za-z]+)\s*:|([()])|(~\d*)|([*?])/g;
 
 const highlighter = new MatchDecorator({
   regexp: SYNTAX,
@@ -152,7 +152,7 @@ class ImplicitWidget extends WidgetType {
   }
 }
 
-const OPERATOR = /^(AND|OR|NOT|IN)$/;
+const OPERATOR = /^(AND|OR|NOT)$/;
 
 // Positions where an implicit operator sits, with the word to show there.
 function implicitGaps(text) {
@@ -204,7 +204,7 @@ function implicitGaps(text) {
     } else {
       const word = /^@\{[^}]*\}|^[^\s()"]+/.exec(text.slice(i))[0];
       const quoted = text[i + word.length] === '"' && word.endsWith(':'); // field:"value"
-      if (OPERATOR.test(word)) {
+      if (OPERATOR.test(word) || (word === 'IN' && top().last === 'operator')) { // IN only as part of NOT IN
         top().last = 'operator';
         i += word.length;
       } else if (quoted) {
@@ -284,12 +284,13 @@ export function createEditor(parent, options) {
     },
     // Insert at the cursor with a space on either side where needed. `cursor` is the cursor's
     // offset inside `text` afterwards (default: the end); `complete` opens the suggestions.
-    insert(text, { cursor = text.length, complete = false } = {}) {
+    // `raw` inserts without spaces, for modifiers that belong to the word before (`*`, `~1`).
+    insert(text, { cursor = text.length, complete = false, raw = false } = {}) {
       const { from, to } = view.state.selection.main;
       const before = view.state.sliceDoc(Math.max(0, from - 1), from);
       const after = view.state.sliceDoc(to, to + 1);
-      const lead = before && !/[\s(]/.test(before) ? ' ' : '';
-      const trail = after && !/[\s)]/.test(after) ? ' ' : '';
+      const lead = !raw && before && !/[\s(]/.test(before) ? ' ' : '';
+      const trail = !raw && after && !/[\s)]/.test(after) ? ' ' : '';
       const insert = `${lead}${text}${trail}`;
       view.dispatch({ changes: { from, to, insert }, selection: { anchor: from + lead.length + cursor }, scrollIntoView: true });
       view.focus();

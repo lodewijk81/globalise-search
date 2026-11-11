@@ -16,3 +16,10 @@ FIELD_BY_KEY.get('profession').label = 'Occupation';
 FIELD_BY_KEY.get('identity').label = 'Ethno-religious appellation';
 FIELD_BY_KEY.get('role').label = 'Role in the text';
 FIELD_BY_KEY.get('documenttype').label = 'Document type';
+
+// Specific statuses and identities are tagged in the texts too (personId:<concept>), so these
+// fields also search documents, like occupations do.
+['status', 'identity'].forEach((key) => {
+  const def = FIELD_BY_KEY.get(key);
+  if (!def.scopes.includes('documents')) def.scopes.unshift('documents');
+});

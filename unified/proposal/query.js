@@ -2,7 +2,8 @@
 // - picked suggestions are inline tokens in the text, `@{field|id|label}`, as in the portal's
 //   search field (@knaw-huc/searchfield), so they can be combined like any other term;
 // - `field:*` means "any annotation of this kind";
-// - `x IN field:…` and `x NOT IN field:…` (containment);
+// - `x NOT IN field:…` (x, but not as part of such an annotation). There is no `IN`: `x IN person:*`
+//   would mean the same as `person:x`;
 // - text regions `header:( … )`, `margin:( … )`, `text:( … )`. The index has no region fields
 //   yet, so these are parsed and explained but searched in the whole document.
 // - diagnose() and readBack() for feedback under the search bar.
@@ -200,7 +201,7 @@ export function tokenize(input) {
     } else {
       const region = readRegion(input, i);
       const field = region ? null : readToken(input, i) || readFieldValue(input, i);
-      const keyword = region || field ? null : /^(NOT\s+IN|AND|OR|NOT|IN)(?![A-Za-z0-9_])/.exec(input.slice(i));
+      const keyword = region || field ? null : /^(NOT\s+IN|AND|OR|NOT)(?![A-Za-z0-9_])/.exec(input.slice(i));
       if (region) {
         tokens.push({ type: 'REGION', region: region.region, inner: region.inner });
         i = region.next;
@@ -228,7 +229,8 @@ export function parse(input) {
   let pos = 0;
   const peek = () => tokens[pos];
 
-  function primary() {
+  // `single`: NOT applies to one word only (`a NOT b c` is a AND NOT b AND c, as in Lucene).
+  function primary(single = false) {
     const token = peek();
     if (!token) return null;
     pos += 1;
@@ -250,7 +252,7 @@ export function parse(input) {
     }
     if (token.type === 'WORD') {
       const words = [token.text];
-      while (peek()?.type === 'WORD') {
+      while (!single && peek()?.type === 'WORD') {
         words.push(peek().text);
         pos += 1;
       }
@@ -262,21 +264,20 @@ export function parse(input) {
   function not() {
     if (peek()?.type === 'NOT') {
       pos += 1;
-      const inner = primary();
+      const inner = primary(true);
       return inner ? { t: 'not', inner } : null;
     }
     return primary();
   }
 
-  // `left IN right` / `left NOT IN right`: binds tighter than AND, so `a IN place:* b` is (a IN place:*) AND b.
+  // `left NOT IN right`: binds tighter than AND, so `a NOT IN place:* b` is (a NOT IN place:*) AND b.
   function contained() {
     let left = not();
-    while (left && (peek()?.type === 'IN' || peek()?.type === 'NOTIN')) {
-      const negate = peek().type === 'NOTIN';
+    while (left && peek()?.type === 'NOTIN') {
       pos += 1;
       const right = primary();
       if (!right) break;
-      left = { t: 'in', negate, left, right };
+      left = { t: 'in', negate: true, left, right };
     }
     return left;
   }
@@ -404,6 +405,10 @@ const documentClauses = {
   organisation: names,
   polity: names,
   role: (chip) => (chip.id ? annotationTerm('personId', chip.id) : taggedSpan('type:Person', chip.value)),
+  // Specific statuses and identities (weduwe, gevangene, Chinees, …) are tagged in the text like
+  // roles. Broader ones (e.g. "juridische status") are not, and there are no paths for them.
+  status: (chip) => (chip.id ? annotationTerm('personId', chip.id) : taggedSpan('type:Person', chip.value)),
+  identity: (chip) => (chip.id ? annotationTerm('personId', chip.id) : taggedSpan('type:Person', chip.value)),
   profession: (chip, mode) => {
     if (!chip.id) return taggedSpan('type:Person', chip.value);
     return mode === 'highlight' ? annotationTerm('personId', chip.id) : { match_phrase: { professionIdPaths: chip.id } };
@@ -459,10 +464,13 @@ const documentClauses = {
   },
 };
 
+const NAME_TYPES = { person: 'Person', ship: 'HumanMadeObject', organisation: 'Group', polity: 'Group' };
+
 function names(chip) {
   const variants = variantsOf(chip);
   if (variants.length === 1 && hasWildcard(variants[0])) {
-    return { span_within: { big: { span_term: { [TEXT]: 'type:Person' } }, little: phraseSpan(variants[0]) } };
+    const type = NAME_TYPES[chip.fieldKey] || 'Person';
+    return { span_within: { big: { span_term: { [TEXT]: `type:${type}` } }, little: phraseSpan(variants[0]) } };
   }
   return should(variants.map((variant) => ({ match_phrase: { [TEXT]: variant } })));
 }
@@ -551,7 +559,7 @@ function proxItemSpan(item) {
   if (!value) return null;
   if (!item.id && value === '*') return anySpanFor(item.fieldKey);
   if (item.fieldKey === 'place') return item.id ? { span_term: { [TEXT]: `placeId:${item.id}` } } : taggedSpan('type:Place', value);
-  if (item.fieldKey === 'role' || item.fieldKey === 'profession' || item.fieldKey === 'concept') {
+  if (['role', 'profession', 'concept', 'status', 'identity'].includes(item.fieldKey)) {
     return item.id ? { span_term: { [TEXT]: `personId:${item.id}` } } : taggedSpan('type:Person', value);
   }
   if (item.fieldKey === 'annotation') {
@@ -562,7 +570,39 @@ function proxItemSpan(item) {
   return phraseSpan(value);
 }
 
+// Fields that have positions in the text, so they can be used in ( … )~N and NOT IN.
+const POSITIONAL = new Set(['place', 'person', 'ship', 'organisation', 'polity', 'role', 'profession', 'concept', 'annotation', 'status', 'identity']);
+
+function positional(item) {
+  if (item.kind !== 'field') return true;
+  if (!POSITIONAL.has(item.fieldKey)) return false;
+  return item.id || String(item.value).trim() !== '*' || Boolean(ANY_TYPES[item.fieldKey]);
+}
+
+// The first field in a proximity group or NOT IN that has no position in the text, if any.
+export function positionalProblem(tree) {
+  let found = null;
+  const check = (item) => {
+    if (!found && item && !positional(item)) found = `${item.fieldKey}:${item.value}`;
+  };
+  const visit = (node) => {
+    if (!node || found) return;
+    if (node.t === 'prox') node.items.forEach(check);
+    if (node.t === 'in') {
+      [node.left, node.right].forEach((side) => {
+        if (side.t === 'field') check({ kind: 'field', ...side.chip });
+        else if (side.t !== 'words') found = found || 'a group';
+      });
+    }
+    if (node.t === 'not' || node.t === 'region') visit(node.inner);
+    if (node.parts) node.parts.forEach(visit);
+  };
+  visit(tree);
+  return found;
+}
+
 function proxClause(node, scope) {
+  if (!node.items.every(positional)) return undefined; // e.g. title: has no position in the text
   const spans = node.items.map(proxItemSpan).filter(Boolean);
   if (spans.length < 2) return spans[0] || null;
   return { span_near: { clauses: spans, slop: node.slop, in_order: false } };
@@ -581,7 +621,7 @@ function proxFallback(node, scope) {
   return clean.length ? { bool: { must: clean } } : null;
 }
 
-// A tree node as one span (for IN / NOT IN): words, a phrase or a single field.
+// A tree node as one span (for NOT IN): words, a phrase or a single field.
 function nodeSpan(node) {
   if (!node) return null;
   if (node.t === 'field') return proxItemSpan({ kind: 'field', ...node.chip });
@@ -597,18 +637,14 @@ function nodeSpan(node) {
   return null;
 }
 
-// `adriaan IN person:*`: the left part where it lies inside the right part.
-// `batavia NOT IN place:*`: the left part where it does not overlap the right part.
+// `batavia NOT IN place:*`: the left part where it does not overlap the right part. Only
+// documents have running text, so the other tabs can't answer this.
 function inClause(node, scope) {
-  if (scope !== 'documents') {
-    // Outside the texts, "adriaan IN person:*" can only mean "a person called adriaan".
-    if (node.negate || node.right.t !== 'field' || !isAny(node.right.chip) || node.left.t !== 'words') return undefined;
-    return fieldClause({ fieldKey: node.right.chip.fieldKey, value: node.left.words.join(' ') }, scope);
-  }
-  const little = nodeSpan(node.left);
-  const big = nodeSpan(node.right);
-  if (!little || !big) return { match_none: {} };
-  return node.negate ? { span_not: { include: little, exclude: big } } : { span_within: { big, little } };
+  if (scope !== 'documents' || positionalProblem(node)) return undefined;
+  const include = nodeSpan(node.left);
+  const exclude = nodeSpan(node.right);
+  if (!include || !exclude) return { match_none: {} };
+  return { span_not: { include, exclude } };
 }
 
 // Returns an ES clause, null for "nothing here", or undefined when the scope can't express part
@@ -745,6 +781,13 @@ export function diagnose(input) {
     if (token.type === 'REGION') visit(tokenize(token.inner));
   });
   visit(tokens);
+  if (tokens.some((token) => token.type === 'WORD' && token.text === 'IN')) {
+    out.push({ level: 'note', text: '“IN” on its own is searched as a word. For a word inside an annotation, use the field: person:adriaan. For a word that is not part of one: batavia NOT IN place:*.' });
+  }
+  const problem = positionalProblem(parse(input || ''));
+  if (problem) {
+    out.push({ level: 'error', text: `${problem} has no position in the text, so it can’t be used inside ( … )~N or with NOT IN.` });
+  }
   if (tokens.some((token) => token.type === 'REGION')) {
     out.push({ level: 'note', text: 'Headers and margins are not in the search index yet. In this prototype a text region is searched in the whole document.' });
   }
@@ -785,9 +828,7 @@ function describe(node) {
     case 'field': return describeChip(node.chip);
     case 'prox': return `${node.items.map(describeItem).join(', ')} within ${node.slop} words of each other`;
     case 'not': return `not ${describe(node.inner)}`;
-    case 'in': return node.negate
-      ? `${describe(node.left)}, but not as part of ${describe(node.right)}`
-      : `${describe(node.left)} inside ${describe(node.right)}`;
+    case 'in': return `${describe(node.left)}, but not as part of ${describe(node.right)}`;
     case 'region': return `[in ${REGIONS[node.region].label}: ${describe(node.inner)}]`;
     case 'and': return node.parts.map((part) => (part.t === 'or' ? `(${describe(part)})` : describe(part))).join('; and ');
     case 'or': return node.parts.map(describe).join(', or ');

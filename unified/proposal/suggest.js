@@ -96,7 +96,28 @@ const applyAndContinue = (text) => (view, completion, from, to) => {
 
 // --- After `field:` -----------------------------------------------------------------------
 
-const TRAILING_FIELD = /(^|[\s(])([A-Za-z]+)\s*:\s*("([^"]*)|((?:[^\s()"]|\s(?=[^\s()]))*))$/;
+// The field being typed at the end of `before`, if any: the last `field:` prefix, with a value
+// that may contain spaces (names) but no operators, brackets, other fields or pills.
+function trailingField(before) {
+  const prefixes = [...before.matchAll(/(^|[\s(])([A-Za-z]+)\s*:\s*/g)];
+  const last = prefixes[prefixes.length - 1];
+  if (!last) return null;
+  const valueStart = last.index + last[0].length;
+  const rest = before.slice(valueStart);
+  let value;
+  if (rest.startsWith('"')) {
+    if (rest.indexOf('"', 1) !== -1) return null; // the quoted value is already closed
+    value = { quoted: rest.slice(1) };
+  } else {
+    if (/[():"}]/.test(rest) || /\s\s$/.test(rest)) return null;
+    if (/(^|\s)(AND|OR|NOT|IN)(\s|$)/.test(rest)) return null;
+    value = { plain: rest };
+  }
+  // Same shape as the regex match this replaces: [, lead, name, , quoted, plain] and .index
+  const match = [last[0], last[1], last[2], undefined, value.quoted, value.plain];
+  match.index = last.index;
+  return match;
+}
 
 async function fieldCompletions(context, match) {
   const fieldKey = FIELD_ALIASES.get(match[2].toLowerCase());
@@ -207,7 +228,7 @@ async function wordCompletions(context, run) {
 
 export async function completionSource(context) {
   const before = context.state.sliceDoc(0, context.pos);
-  const field = TRAILING_FIELD.exec(before);
+  const field = trailingField(before);
   if (field && !Object.values(REGIONS).some((region) => region.aliases.includes(field[2].toLowerCase()))) {
     return fieldCompletions(context, field);
   }

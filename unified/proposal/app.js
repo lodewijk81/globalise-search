@@ -21,7 +21,7 @@ import {
   annotatedToHtml, archiveTree, countHits, documentCard, documentFacets, escapeHtml, formatCount, legendHtml, objectCard,
   personCard, personFacets, personIds,
 } from '../render.js';
-import { buildHighlightQuery, buildQuery, collectFieldNodes, diagnose, encodeToken, parse, plainTerms, readBack, REGIONS } from './query.js';
+import { buildHighlightQuery, buildQuery, collectFieldNodes, diagnose, encodeToken, parse, plainTerms, positionalProblem, readBack, REGIONS } from './query.js';
 import { createEditor } from './editor.js';
 import { conceptLabelsEn } from './labels.js';
 import { ANY_FIELDS, completionSource } from './suggest.js';
@@ -112,7 +112,7 @@ $('#tool-clear').addEventListener('click', () => {
 
 // --- The + menu ---------------------------------------------------------------------------
 
-const insertAttrs = (text, cursor = text.length, complete = false) => `data-insert="${escapeHtml(text)}" data-cursor="${cursor}"${complete ? ' data-complete="true"' : ''}`;
+const insertAttrs = (text, cursor = text.length, complete = false, raw = false) => `data-insert="${escapeHtml(text)}" data-cursor="${cursor}"${complete ? ' data-complete="true"' : ''}${raw ? ' data-raw="true"' : ''}`;
 
 // What you can search for, per kind of thing. Each thing can have properties; when the indexes
 // get new properties (e.g. place type, ship type), they are added to its list and appear here.
@@ -175,8 +175,8 @@ function plusMenuHtml() {
       <h3>Words</h3>
       <div class="menu-buttons">
         <button type="button" ${insertAttrs('""', 1)}>"exact phrase"</button>
-        <button type="button" ${insertAttrs('*', 1)} title="Any letters, e.g. slav*">wildcard *</button>
-        <button type="button" ${insertAttrs('~1', 2)} title="One letter may differ, e.g. timmerman~1">fuzzy ~1</button>
+        <button type="button" ${insertAttrs('*', 1, false, true)} title="Any letters, e.g. slav*">wildcard *</button>
+        <button type="button" ${insertAttrs('~1', 2, false, true)} title="One letter may differ, e.g. timmerman~1">fuzzy ~1</button>
       </div>
     </div>
     <div class="menu-section">
@@ -198,7 +198,7 @@ plusMenu.addEventListener('mousedown', (event) => {
 plusMenu.addEventListener('click', (event) => {
   const button = event.target.closest('[data-insert]');
   if (button) {
-    editor.insert(button.dataset.insert, { cursor: Number(button.dataset.cursor), complete: button.dataset.complete === 'true' });
+    editor.insert(button.dataset.insert, { cursor: Number(button.dataset.cursor), complete: button.dataset.complete === 'true', raw: button.dataset.raw === 'true' });
     togglePlusMenu(false);
     return;
   }
@@ -263,7 +263,7 @@ document.addEventListener('keydown', (event) => {
 function readUrl() {
   const params = new URLSearchParams(window.location.search);
   state.q = params.get('q') || '';
-  state.scope = SCOPES[params.get('scope')] ? params.get('scope') : 'documents';
+  state.scope = SCOPE_KEYS.includes(params.get('scope')) ? params.get('scope') : 'documents';
   state.page = Math.max(1, Number(params.get('page')) || 1);
   state.sort = params.get('sort') || 'relevance';
   state.year = params.get('year') || '';
@@ -394,6 +394,8 @@ async function runSearch({ replace = false } = {}) {
 function unavailableReason(scope) {
   const tree = parse(state.q);
   const text = JSON.stringify(tree || {});
+  const problem = positionalProblem(tree);
+  if (problem) return `${problem} has no position in the text, so it can't be used in ( … )~N or with NOT IN.`;
   if (/"t":"region"/.test(text)) return `Text regions only exist in documents, so this search can't be applied to ${SCOPES[scope].label.toLowerCase()}.`;
   if (/"t":"prox"/.test(text) || /"negate":true/.test(text)) return `Proximity and NOT IN need running text, which only documents have.`;
   return `Part of this search doesn't apply to ${SCOPES[scope].label.toLowerCase()}.`;
@@ -817,7 +819,7 @@ window.addEventListener('popstate', () => {
 const EXAMPLES = [
   { want: 'Hendrick Swaardecroon OR Batavia, as picked records (pills)', q: `${encodeToken('person', 'Person_26454', 'Hendrick Swaardecroon')} OR ${encodeToken('place', 'GLOB2_894', 'Batavia')}` },
   { want: 'Payments near Batavia, 1680-1690', q: '(place:Batavia event:Payment)~5 year:1680-1690' },
-  { want: '“adriaan”, but only inside a person annotation', q: 'adriaan IN person:*' },
+  { want: 'Any person containing “adriaan” (annotations and records)', q: 'person:adriaan' },
   { want: '“batavia”, but not as a place (e.g. a ship called Batavia)', q: 'batavia NOT IN place:*' },
   { want: 'Any ship, together with pepper', q: 'ship:* peper' },
   { want: 'Slaves near a place matching *javaans*', q: '(slav* place:*javaans*)~5' },
