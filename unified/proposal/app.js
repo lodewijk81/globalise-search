@@ -825,7 +825,7 @@ const EXAMPLES = [
   { want: 'Slaves near a place matching *javaans*', q: '(slav* place:*javaans*)~5' },
   { want: 'All military occupations (includes the narrower ones)', q: encodeToken('profession', 'e0c5801f-60f4-4a54-bd3b-9f40a8f78e3e', 'Military occupations'), scope: 'persons' },
   { want: 'Text regions: missive in a header, slaves in a margin, koopman anywhere', q: 'header:(missive) margin:(slav*) koopman' },
-  { want: 'Thesaurus concepts about pepper', q: 'concept:peper', scope: 'concepts' },
+  { want: 'A legal term from the South Asia Glossary (not tagged in the texts yet)', q: 'concept:binna', scope: 'concepts' },
 ];
 
 function renderExamples() {
