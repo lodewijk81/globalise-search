@@ -7,7 +7,14 @@ import { FIELD_ALIASES, FIELD_BY_KEY, SCOPES, SCOPE_KEYS } from '../config.js';
 SCOPES.organisations.index = 'organisation-objects,polity-objects';
 const polities = SCOPE_KEYS.indexOf('polities');
 if (polities !== -1) SCOPE_KEYS.splice(polities, 1);
-['polity', 'polities', 'rijk'].forEach((alias) => FIELD_ALIASES.set(alias, 'organisation'));
+['polity', 'polities'].forEach((alias) => FIELD_ALIASES.set(alias, 'organisation'));
+
+// No Dutch aliases: one name per field keeps the syntax, the suggestions and the help simple.
+const DUTCH = ['plaats', 'persoon', 'schip', 'rijk', 'rol', 'beroep', 'titel', 'jaar'];
+FIELD_BY_KEY.forEach((def) => {
+  def.aliases = def.aliases.filter((alias) => !DUTCH.includes(alias));
+});
+DUTCH.forEach((alias) => FIELD_ALIASES.delete(alias));
 FIELD_BY_KEY.get('polity').hidden = true;
 FIELD_BY_KEY.get('organisation').hint = 'An organisation or polity, e.g. Danish East India Company, Mataram';
 

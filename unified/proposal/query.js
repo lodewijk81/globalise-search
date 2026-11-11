@@ -39,9 +39,9 @@ function readToken(input, i) {
 }
 
 export const REGIONS = {
-  header: { label: 'a header', aliases: ['header', 'heading', 'kop'] },
-  margin: { label: 'a margin', aliases: ['margin', 'marginalia', 'marge'] },
-  text: { label: 'the main text', aliases: ['text', 'main', 'body', 'tekst'] },
+  header: { label: 'a header', aliases: ['header', 'heading'] },
+  margin: { label: 'a margin', aliases: ['margin', 'marginalia'] },
+  text: { label: 'the main text', aliases: ['text', 'main', 'body'] },
 };
 const REGION_ALIASES = new Map(Object.entries(REGIONS).flatMap(([key, def]) => def.aliases.map((alias) => [alias, key])));
 
@@ -171,7 +171,37 @@ function tokenizeProximityItems(input) {
     const fuzzy = /^(.+?)~(\d*)$/.exec(raw[0]);
     items.push(fuzzy ? { kind: 'word', text: fuzzy[1], fuzzy: fuzzy[2] || 'AUTO' } : { kind: 'word', text: raw[0], fuzzy: null });
   }
-  return items;
+  return groupAlternatives(items);
+}
+
+// Inside ( … )~N, `a OR b` is one alternative: (slaa* OR slav* place:Batavia)~5 means
+// (slaa* or slav*) near Batavia. AND is what the group means anyway, so it is dropped.
+// NOT is kept as a marker so diagnose() can say it isn't supported here.
+function groupAlternatives(items) {
+  const isWord = (item, word) => item?.kind === 'word' && item.text === word && !item.fuzzy;
+  const out = [];
+  for (let i = 0; i < items.length; i += 1) {
+    const item = items[i];
+    if (isWord(item, 'AND')) continue;
+    if (isWord(item, 'NOT')) {
+      out.push({ kind: 'not' });
+      continue;
+    }
+    if (isWord(item, 'OR')) {
+      const previous = out.pop();
+      const next = items[i + 1];
+      if (!previous || !next || previous.kind === 'not' || isWord(next, 'OR') || isWord(next, 'AND') || isWord(next, 'NOT')) {
+        if (previous) out.push(previous); // a stray OR: ignore it
+        continue;
+      }
+      const options = previous.kind === 'or' ? previous.items : [previous];
+      out.push({ kind: 'or', items: [...options, next] });
+      i += 1;
+      continue;
+    }
+    out.push(item);
+  }
+  return out;
 }
 
 export function tokenize(input) {
@@ -324,7 +354,10 @@ export function collectFieldNodes(tree, out = []) {
     collectFieldNodes(tree.right, out);
   }
   if (tree.parts) tree.parts.forEach((part) => collectFieldNodes(part, out));
-  if (tree.t === 'prox') tree.items.filter((item) => item.kind === 'field').forEach((item) => out.push(item));
+  if (tree.t === 'prox') {
+    const add = (item) => (item.kind === 'or' ? item.items.forEach(add) : item.kind === 'field' && out.push(item));
+    tree.items.forEach(add);
+  }
   return out;
 }
 
@@ -554,7 +587,8 @@ function wordsClause(words, scope) {
 function proxItemSpan(item) {
   if (item.kind === 'word') return wordSpan(item.text, item.fuzzy);
   if (item.kind === 'phrase') return phraseSpan(item.text);
-  if (item.kind === 'region') return null; // proximity across text regions isn't possible (diagnose() says so)
+  if (item.kind === 'region' || item.kind === 'not') return null; // not possible here (diagnose() says so)
+  if (item.kind === 'or') return anySpan(item.items.map(proxItemSpan).filter(Boolean));
   const value = (item.value || '').trim();
   if (!value) return null;
   if (!item.id && value === '*') return anySpanFor(item.fieldKey);
@@ -574,6 +608,7 @@ function proxItemSpan(item) {
 const POSITIONAL = new Set(['place', 'person', 'ship', 'organisation', 'polity', 'role', 'profession', 'concept', 'annotation', 'status', 'identity']);
 
 function positional(item) {
+  if (item.kind === 'or') return item.items.every(positional);
   if (item.kind !== 'field') return true;
   if (!POSITIONAL.has(item.fieldKey)) return false;
   return item.id || String(item.value).trim() !== '*' || Boolean(ANY_TYPES[item.fieldKey]);
@@ -587,7 +622,10 @@ export function positionalProblem(tree) {
   };
   const visit = (node) => {
     if (!node || found) return;
-    if (node.t === 'prox') node.items.forEach(check);
+    if (node.t === 'prox') {
+      const each = (item) => (item.kind === 'or' ? item.items.forEach(each) : check(item));
+      node.items.forEach(each);
+    }
     if (node.t === 'in') {
       [node.left, node.right].forEach((side) => {
         if (side.t === 'field') check({ kind: 'field', ...side.chip });
@@ -610,12 +648,15 @@ function proxClause(node, scope) {
 
 // Proximity needs word positions, which only documents have. Elsewhere it means "all of these".
 function proxFallback(node, scope) {
-  const parts = node.items
-    .filter((item) => item.kind !== 'region')
-    .map((item) => {
-      if (item.kind === 'field') return fieldClause({ fieldKey: item.fieldKey, value: item.value, id: item.id }, scope);
-      return wordsClause([item.kind === 'phrase' ? `"${item.text}"` : item.text], scope);
-    });
+  const clauseFor = (item) => {
+    if (item.kind === 'field') return fieldClause({ fieldKey: item.fieldKey, value: item.value, id: item.id }, scope);
+    if (item.kind === 'or') {
+      const options = item.items.map(clauseFor).filter((clause) => clause !== undefined);
+      return options.length ? should(options.filter(Boolean)) : undefined;
+    }
+    return wordsClause([item.kind === 'phrase' ? `"${item.text}"` : item.text], scope);
+  };
+  const parts = node.items.filter((item) => item.kind !== 'region' && item.kind !== 'not').map(clauseFor);
   if (parts.includes(undefined)) return undefined;
   const clean = parts.filter(Boolean);
   return clean.length ? { bool: { must: clean } } : null;
@@ -728,7 +769,10 @@ export function plainTerms(tree, chips) {
     if (!node) return;
     if (node.t === 'words') node.words.forEach((word) => out.push(word));
     if (node.t === 'field' && !isAny(node.chip)) out.push(node.chip.value);
-    if (node.t === 'prox') node.items.forEach((item) => out.push(item.text || item.value || ''));
+    if (node.t === 'prox') {
+      const add = (item) => (item.kind === 'or' ? item.items.forEach(add) : out.push(item.text || item.value || ''));
+      node.items.forEach(add);
+    }
     if (node.t === 'region') visit(node.inner);
     if (node.t === 'in') {
       visit(node.left);
@@ -775,6 +819,9 @@ export function diagnose(input) {
   }
   const tokens = tokenize(input || '');
   const visit = (list) => list.forEach((token) => {
+    if (token.type === 'PROX' && token.items.some((item) => item.kind === 'not')) {
+      out.push({ level: 'error', text: 'NOT can’t be used inside ( … )~N, and is ignored there. Put it outside the brackets: (a b)~5 NOT c.' });
+    }
     if (token.type === 'PROX' && token.items.some((item) => item.kind === 'region')) {
       out.push({ level: 'error', text: 'Words in different text regions can’t be near each other. The region inside ( … )~N is ignored.' });
     }
@@ -818,6 +865,8 @@ function describeItem(item) {
   if (item.kind === 'word') return `“${item.text}”`;
   if (item.kind === 'phrase') return `“${item.text}”`;
   if (item.kind === 'region') return `(${REGIONS[item.region].label}: ignored)`;
+  if (item.kind === 'not') return '(NOT: ignored)';
+  if (item.kind === 'or') return `(${item.items.map(describeItem).join(' or ')})`;
   return describeChip(item);
 }
 

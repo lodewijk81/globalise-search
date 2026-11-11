@@ -18,6 +18,7 @@ python3 -m http.server 8000
 | The search bar does the heavy lifting | One CodeMirror editor, like the portal's search field. A picked suggestion becomes an **inline pill** (`@{field\|id\|label}` in the text), so it can be combined with `AND`, `OR`, `NOT`, brackets and proximity |
 | Three kinds of pills | A specific record (picked), any of a kind (`ship:*`, `event:*`), text in a field (`person:adriaan`). Click a pill to switch between them |
 | Autocomplete with spaces | `jan pietersz co` keeps narrowing while there are matches. Results are grouped by type, with "Any …" options and the nested Person options from #123 |
+| Alternatives in proximity | `(slaa* OR slav* place:Batavia)~5`: terms joined by `OR` inside `( … )~N` are alternatives (`span_or`). `NOT` isn't allowed there, and the bar says so |
 | Not as part of | `batavia NOT IN place:*` (an Elasticsearch `span_not` query on `annotatedText`). There is no `IN`: `adriaan IN person:*` would mean the same as `person:adriaan` |
 | Text regions | `header:( … )`, `margin:( … )`, `text:( … )` are parsed, highlighted and read back. **The index has no region fields yet**, so they are searched in the whole document, and the page says so |
 | `+` menu | Everything you can search with, inserted at the cursor. Organised by thing (document, person, place, ship, organisation, event, concept), each with its properties. The list of properties is data (`THINGS` in `app.js`), so new properties from the indexes can be added there |
