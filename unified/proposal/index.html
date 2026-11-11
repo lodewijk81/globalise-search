@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GLOBALISE – Query syntax prototype</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="../../styles.css" />
+    <link rel="stylesheet" href="../unified.css" />
+    <link rel="stylesheet" href="proposal.css" />
+  </head>
+  <body data-mode="home">
+    <div class="prototype-banner" role="note">
+      <strong>Functional prototype</strong> of the query syntax proposal for
+      <a href="https://github.com/globalise-huygens/glob-portal-infomodel/issues/122">#122</a>.
+      It shows how searching could <em>work</em>, not how it should <em>look</em>: the design is up to Jona.
+      Runs on the work-in-progress indexes at search.globalise.nl.
+    </div>
+
+    <header class="proto-top">
+      <a href="./" class="proto-brand">GLOBALISE <span>query syntax prototype</span></a>
+      <a href="../index.html" class="proto-link">Search everything (current prototype)</a>
+    </header>
+
+    <section class="search-area">
+      <div class="bar" id="bar">
+        <button type="button" class="bar-plus" id="plus-button" aria-expanded="false" aria-controls="plus-menu" title="Everything you can search with">+</button>
+        <div class="bar-editor" id="editor"></div>
+        <div class="bar-tools" role="toolbar" aria-label="Search bar">
+          <button type="button" id="tool-search" title="Search (Enter)">Search</button>
+          <button type="button" id="tool-undo" title="Undo" disabled>↶</button>
+          <button type="button" id="tool-redo" title="Redo" disabled>↷</button>
+          <button type="button" id="tool-clear" title="Clear">✕</button>
+        </div>
+      </div>
+      <div class="plus-menu" id="plus-menu" hidden></div>
+
+      <div class="feedback" aria-live="polite">
+        <p class="readback" id="readback" hidden></p>
+        <ul class="diagnostics" id="diagnostics" hidden></ul>
+      </div>
+
+      <div class="filter-row results-only" id="filter-row" hidden>
+        <span class="filter-row-label">Filters on this tab</span>
+        <span id="filter-chips"></span>
+      </div>
+
+      <div class="scope-tabs results-only" id="scope-tabs" role="tablist" aria-label="Result types"></div>
+    </section>
+
+    <section class="home-only proto-home">
+      <h2>Try a query</h2>
+      <p class="muted-note">
+        Type in the bar and pick from the suggestions, or open <strong>+</strong> to see everything you can search with.
+        Each example shows the query as you would type it.
+      </p>
+      <div class="examples" id="examples"></div>
+    </section>
+
+    <main class="results-shell results-only">
+      <aside id="facets" aria-label="Refine results" hidden></aside>
+      <div>
+        <section class="toolbar">
+          <div id="status" aria-live="polite"></div>
+          <div class="toolbar-right">
+            <span id="sort-wrap" hidden>
+              <label for="sort-select">Sort by</label>
+              <select id="sort-select"></select>
+            </span>
+          </div>
+        </section>
+        <section id="results" aria-live="polite"></section>
+        <nav id="pagination" class="pagination" aria-label="Pages"></nav>
+      </div>
+    </main>
+
+    <div class="pill-popover" id="pill-popover" role="dialog" aria-label="Search term options" hidden></div>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
