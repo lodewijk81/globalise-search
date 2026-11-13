@@ -16,7 +16,7 @@ export function escapeHtml(value) {
 export const formatCount = (value) => Number(value || 0).toLocaleString('en-US');
 const plural = (count, word) => `${formatCount(count)} ${word}${count === 1 ? '' : 's'}`;
 
-const chipAttr = (chip, scope) => `data-add-chip="${escapeHtml(JSON.stringify(chip))}"${scope ? ` data-to-scope="${scope}"` : ''}`;
+export const chipAttr = (chip, scope) => `data-add-chip="${escapeHtml(JSON.stringify(chip))}"${scope ? ` data-to-scope="${scope}"` : ''}`;
 
 export function chipHtml(chip, { removable = false, index = 0 } = {}) {
   const def = FIELD_BY_KEY.get(chip.fieldKey);
@@ -211,11 +211,35 @@ export function personCard(hit, terms, labelOf, personName) {
 
 // Object indices only hold id and title today. Anything added later appears here by itself.
 function extraFields(source) {
-  const known = new Set(['id', 'identifier', 'type', 'title']);
+  // `facets` repeats the hierarchy and dates in a form meant for aggregations.
+  const known = new Set(['id', 'identifier', 'type', 'title', 'facets']);
   const rows = Object.entries(source).filter(([key, value]) => !known.has(key) && value !== null && value !== '' && !(Array.isArray(value) && !value.length));
   if (!rows.length) return '';
   const cell = (value) => escapeHtml(typeof value === 'object' ? JSON.stringify(value) : value);
   return `<dl class="extra-fields">${rows.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${Array.isArray(value) ? value.map(cell).join(', ') : cell(value)}</dd>`).join('')}</dl>`;
+}
+
+// Where a concept is used, as buttons that search for it there.
+export function conceptUseLinks(usage, name, id) {
+  const chipFor = (key) => ({ fieldKey: key, value: name, id });
+  const uses = usage
+    ? [
+        [usage.role, 'role mention', 'role', 'documents'],
+        [usage.profession, 'document with this profession', 'profession', 'documents'],
+        [usage.documenttype, 'document of this type', 'documenttype', 'documents'],
+        [usage.occupation, 'person with this occupation', 'profession', 'persons'],
+        [usage.status, 'person with this status', 'status', 'persons'],
+        [usage.identity, 'person with this identity', 'identity', 'persons'],
+      ].filter(([count]) => count > 0)
+    : [];
+  return uses.length
+    ? uses
+        .map(([count, unit, key, target]) => {
+          const text = count === 1 ? `1 ${unit}` : `${formatCount(count)} ${unit.replace(/^person/, 'persons').replace(/^document/, 'documents').replace(/^role mention/, 'role mentions')}`;
+          return `<button type="button" class="link-button" ${chipAttr(chipFor(key), target)} data-replace-query="true">${text}</button>`;
+        })
+        .join('')
+    : '<span class="muted-note">Not used in documents or persons</span>';
 }
 
 export function objectCard(hit, scope, terms, usage, labelOf) {
@@ -229,25 +253,7 @@ export function objectCard(hit, scope, terms, usage, labelOf) {
   let links = `<button type="button" class="link-button" ${chipAttr(chip, 'documents')} data-replace-query="true">Find in documents</button>`;
   let trail = '';
   if (scope === 'concepts') {
-    const chipFor = (key) => ({ fieldKey: key, value: name, id: hit._id });
-    const uses = usage
-      ? [
-          [usage.role, 'role mention', 'role', 'documents'],
-          [usage.profession, 'document with this profession', 'profession', 'documents'],
-          [usage.documenttype, 'document of this type', 'documenttype', 'documents'],
-          [usage.occupation, 'person with this occupation', 'profession', 'persons'],
-          [usage.status, 'person with this status', 'status', 'persons'],
-          [usage.identity, 'person with this identity', 'identity', 'persons'],
-        ].filter(([count]) => count > 0)
-      : [];
-    links = uses.length
-      ? uses
-          .map(([count, unit, key, target]) => {
-            const text = count === 1 ? `1 ${unit}` : `${formatCount(count)} ${unit.replace(/^person/, 'persons').replace(/^document/, 'documents').replace(/^role mention/, 'role mentions')}`;
-            return `<button type="button" class="link-button" ${chipAttr(chipFor(key), target)} data-replace-query="true">${text}</button>`;
-          })
-          .join('')
-      : '<span class="muted-note">Not used in documents or persons</span>';
+    links = conceptUseLinks(usage, name, hit._id);
     if (usage?.path) {
       const names = usage.path.split('|').map((id) => labelOf(id)).filter(Boolean);
       if (names.length > 1) trail = `<div class="archive-trail">${names.slice(0, -1).map((part) => `<span class="crumb is-static">${escapeHtml(part)}</span>`).join('<span class="crumb-sep">›</span>')}</div>`;

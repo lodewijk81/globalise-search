@@ -25,6 +25,7 @@ import { buildHighlightQuery, buildQuery, collectFieldNodes, diagnose, encodeTok
 import { createEditor } from './editor.js';
 import { conceptLabelsEn } from './labels.js';
 import { ANY_FIELDS, completionSource } from './suggest.js';
+import { conceptCard, conceptCardIds, narrowerConcepts } from './conceptcard.js';
 
 const $ = (selector) => document.querySelector(selector);
 const tabsEl = $('#scope-tabs');
@@ -423,10 +424,11 @@ async function cardsFor(scope, hits, tree) {
     return hits.map((hit) => personCard(hit, terms, labelOf, nameOf)).join('');
   }
   if (scope === 'concepts') {
-    const usage = await conceptUsage(hits.map((hit) => hit._id)).catch(() => []);
-    const labelOf = await conceptLabelsEn(usage.flatMap((item) => item.path.split('|')));
+    const ids = hits.map((hit) => hit._id);
+    const [usage, narrower] = await Promise.all([conceptUsage(ids).catch(() => []), narrowerConcepts(ids)]);
+    const labelOf = await conceptLabelsEn(conceptCardIds(hits, narrower));
     const byId = new Map(usage.map((item) => [item.id, item]));
-    return hits.map((hit) => objectCard(hit, scope, terms, byId.get(hit._id), labelOf)).join('');
+    return hits.map((hit) => conceptCard(hit, terms, byId.get(hit._id), labelOf, narrower.get(hit._id))).join('');
   }
   return hits.map((hit) => objectCard(hit, scope, terms)).join('');
 }

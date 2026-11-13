@@ -11,7 +11,8 @@ import { suggestionsFor } from '../api.js';
 import { encodeToken, hasWildcard, REGIONS } from './query.js';
 import { formatCount } from '../render.js';
 import { startCompletion, closeCompletion } from '../vendor/codemirror.js';
-import { englishLabel, loadEnglish } from './labels.js';
+import { conceptLabelsEn, englishLabel, loadEnglish } from './labels.js';
+import { broaderPaths, conceptHierarchy, conceptRecord, conceptSuggestions, countText, parseDefinition } from './concepts.js';
 
 const MIN_CHARS = 2;
 const DEBOUNCE_MS = 200;
@@ -46,7 +47,8 @@ function signalFor(context) {
 
 const countDetail = (item) => {
   const parts = [];
-  if (item.count != null) parts.push(`${formatCount(item.count)} ${item.unit || 'results'}`);
+  if (item.counts) parts.push(item.unused ? 'thesaurus only, not tagged in documents or persons' : countText(item.counts));
+  else if (item.count != null) parts.push(`${formatCount(item.count)} ${item.unit || 'results'}`);
   if (item.note) parts.push(item.note);
   return parts.join(' · ');
 };
@@ -66,15 +68,56 @@ function rank(items, typed) {
     .map(({ item }) => item);
 }
 
-// Thesaurus concepts: show the English label, with the Dutch one as a note.
+// Thesaurus concepts: show the English label, with the Dutch one and the label that matched
+// what was typed as a note.
 async function withEnglish(def, items) {
   if (def.source !== 'concept' || !items.length) return items;
   await loadEnglish(items.map((item) => item.id));
   return items.map((item) => {
     const en = englishLabel(item.id);
-    if (!en || en === item.value) return item;
-    return { ...item, display: en, note: [item.value, item.note].filter(Boolean).join(' · ') };
+    const display = en || item.value;
+    const matched = item.matched && ![display, item.value].some((label) => label.toLowerCase() === item.matched.toLowerCase()) ? `matches “${item.matched}”` : '';
+    const notes = [en && en !== item.value ? item.value : '', matched, item.note].filter(Boolean);
+    return { ...item, display, note: notes.join(' · ') };
   });
+}
+
+// Concept suggestions come from the thesaurus index (counted, filtered to the field's part of
+// the thesaurus); everything else from ../api.js.
+const lookup = (def, value, signal) => (def.source === 'concept' ? conceptSuggestions(def, value, signal) : suggestionsFor(def, value, signal));
+
+// The side panel next to a highlighted concept: where it sits in the thesaurus, and its
+// definition.
+function conceptInfo(id) {
+  return async () => {
+    const record = conceptRecord(id);
+    if (!record) return null;
+    const paths = broaderPaths(record, id).slice(0, 2);
+    const labelOf = await conceptLabelsEn(paths.flat());
+    const node = document.createElement('div');
+    node.className = 'concept-info';
+    paths.forEach((parts) => {
+      const trail = document.createElement('div');
+      trail.className = 'concept-info-path';
+      trail.textContent = parts.map((part) => labelOf(part)).filter(Boolean).join(' › ');
+      if (trail.textContent) node.append(trail);
+    });
+    const definitions = (record.description || []).map(parseDefinition);
+    const definition = definitions.find((item) => item.translated) || definitions[0];
+    if (definition?.text) {
+      const text = document.createElement('p');
+      text.className = 'concept-info-def';
+      text.textContent = definition.text.length > 280 ? `${definition.text.slice(0, 277)}…` : definition.text;
+      node.append(text);
+      if (definition.reference) {
+        const cite = document.createElement('p');
+        cite.className = 'concept-info-cite';
+        cite.textContent = definition.reference.length > 120 ? `${definition.reference.slice(0, 117)}…` : definition.reference;
+        node.append(cite);
+      }
+    }
+    return node.childNodes.length ? node : null;
+  };
 }
 
 function tokenOption(def, item, section) {
@@ -85,7 +128,27 @@ function tokenOption(def, item, section) {
     section,
     type: def.key,
     apply: encodeToken(def.key, String(item.id ?? item.value), label),
+    ...(def.source === 'concept' && item.id ? { info: conceptInfo(item.id) } : {}),
   };
+}
+
+// Broader and narrower concepts of the best match, so a whole group (or a more specific concept)
+// can be picked. Searching for a concept includes its narrower concepts.
+async function hierarchyOptions(def, item, signal) {
+  const { broader, narrower } = await conceptHierarchy(def, item.id, signal).catch(() => ({ broader: [], narrower: [] }));
+  const name = item.display || item.value;
+  const option = (entry, label, section) => ({
+    label,
+    detail: countText(entry.counts),
+    section,
+    type: def.key,
+    apply: encodeToken(def.key, entry.id, entry.label),
+    info: conceptInfo(entry.id),
+  });
+  return [
+    ...broader.map((entry) => option(entry, `${'\u2003'.repeat(entry.depth)}↑ ${entry.label}`, { name: `Broader than “${name}”`, rank: 2 })),
+    ...narrower.map((entry) => option(entry, `↓ ${entry.label}`, { name: `Narrower than “${name}”`, rank: 3 })),
+  ];
 }
 
 // Inserts text and immediately asks for the next suggestions (e.g. after choosing `person:`).
@@ -154,8 +217,13 @@ async function fieldCompletions(context, match) {
   options.push({ label: `${prefix}${quote(value)}`, detail: hasWildcard(value) ? 'wildcard, as typed' : `${def.label.toLowerCase()} containing this text`, section: { name: 'As typed', rank: 0 }, apply: `${prefix}${quote(value)} ` });
   if (!def.source || hasWildcard(value) || value.length < MIN_CHARS) return { from, options, filter: false };
   if (!(await wait(context))) return null;
-  const items = await withEnglish(def, await suggestionsFor(def, value, signalFor(context)).catch(() => []));
-  rank(items.filter(keep), value).forEach((item) => options.push(tokenOption(def, item, { name: `${def.label}: pick one`, rank: 1 })));
+  const signal = signalFor(context);
+  const items = await withEnglish(def, await lookup(def, value, signal).catch(() => []));
+  const ranked = rank(items.filter(keep), value);
+  ranked.forEach((item) => options.push(tokenOption(def, item, { name: `${def.label}: pick one`, rank: 1 })));
+  const best = ranked.find((item) => !item.unused);
+  if (def.source === 'concept' && best) options.push(...(await hierarchyOptions(def, best, signal)));
+  if (context.aborted) return null;
   return { from, options, filter: false };
 }
 
@@ -209,7 +277,7 @@ async function wordCompletions(context, run) {
   const signal = signalFor(context);
   const groups = await Promise.all(BARE_WORD_FIELDS.map((key) => {
     const def = FIELD_BY_KEY.get(key);
-    return suggestionsFor(def, run.run, signal).then((items) => withEnglish(def, rank(items, run.run).slice(0, 3))).then((items) => ({ def, items })).catch(() => ({ def, items: [] }));
+    return lookup(def, run.run, signal).then((items) => withEnglish(def, rank(items.filter((item) => !item.unused), run.run).slice(0, 3))).then((items) => ({ def, items })).catch(() => ({ def, items: [] }));
   }));
   if (context.aborted) return null;
   groups.forEach(({ def, items }, index) => {

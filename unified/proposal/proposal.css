@@ -117,6 +117,33 @@
   border-bottom: 0;
 }
 .cm-completionDetail { display: block; margin: 0 !important; font-style: normal !important; font-size: 0.78rem; color: var(--text-3); }
+.cm-tooltip.cm-completionInfo {
+  background: #1d1f22;
+  border: 1px solid var(--hairline);
+  color: var(--text-1);
+  padding: 8px 10px;
+  max-width: 320px;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+.concept-info-path { color: var(--text-3); font-size: 0.74rem; margin-bottom: 2px; }
+.concept-info-def { margin: 6px 0 0; color: var(--text-2); }
+.concept-info-cite { margin: 4px 0 0; color: var(--text-3); font-size: 0.72rem; font-style: italic; }
+
+/* --- Concept cards (Thesaurus tab) ------------------------------------------------------- */
+
+.card-concept .archive-trail + .archive-trail { margin-top: 2px; }
+.concept-defs { margin-top: 10px; display: grid; gap: 8px; }
+.concept-def p { margin: 0; color: var(--text-2); font-size: 0.86rem; line-height: 1.5; }
+.concept-def .concept-cite { margin-top: 2px; color: var(--text-3); font-size: 0.74rem; }
+.concept-cite a { color: inherit; }
+.concept-def-note { color: var(--text-3); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; margin-left: 4px; }
+.concept-more summary { cursor: pointer; color: var(--text-3); font-size: 0.78rem; }
+.concept-more[open] summary { margin-bottom: 8px; }
+.concept-more .concept-def + .concept-def { margin-top: 8px; }
+.concept-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px; margin: 8px 0 0; color: var(--text-2); font-size: 0.8rem; }
+.concept-row .crumb { max-width: 220px; white-space: nowrap; }
+.concept-row-label { color: var(--text-3); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; margin-right: 6px; }
 
 /* --- The + menu ------------------------------------------------------------------------- */
 

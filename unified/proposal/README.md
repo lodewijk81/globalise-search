@@ -23,7 +23,10 @@ python3 -m http.server 8000
 | Text regions | `header:( … )`, `margin:( … )`, `text:( … )` are parsed, highlighted and read back. **The index has no region fields yet**, so they are searched in the whole document, and the page says so |
 | `+` menu | Everything you can search with, inserted at the cursor. Organised by thing (document, person, place, ship, organisation, event, concept), each with its properties. The list of properties is data (`THINGS` in `app.js`), so new properties from the indexes can be added there |
 | Polities | Treated as organisations: one `organisation:` field and one Organisations tab over both indexes (`setup.js`) |
-| English labels | Thesaurus concepts (facets, card tags, suggestions) are shown with their English prefLabel from the JSON-LD in the object store (`labels.js`). The search index only has the Dutch title |
+| English labels | Thesaurus concepts (facets, card tags, suggestions) are shown with their English prefLabel from the JSON-LD in the object store (`labels.js`). The search index lists all labels in one `title` field, without saying which is preferred or in which language |
+| Concept suggestions | Occupation, status, identity, role, document type and thesaurus suggestions come from the thesaurus index, limited to the branches of the thesaurus that field uses. Each one is counted in documents and persons with the same clauses the search uses, and concepts that would find nothing are left out (`concept:` still offers a few, marked *thesaurus only*, because it also searches the Thesaurus tab). A label other than the main one that matched the typed text is shown (*matches “…”*) |
+| Hierarchy in suggestions | Below the matches: the broader concepts of the best match, and its most used narrower ones, each with counts, so a whole group or a more specific concept can be picked. The side panel of a highlighted concept shows its place in the thesaurus and a definition |
+| Concept cards | The Thesaurus tab shows every label, the broader concepts (clickable, one line per place in the hierarchy), narrower concepts, definitions with their sources, related terms, links to Getty AAT, Wikidata and other vocabularies, and where the concept is used (`conceptcard.js`) |
 | AND is the default | A faint *and* between terms (*near* inside `( … )~N`). It is not part of the text, and it shows how the bar splits the query, e.g. `person:jan pietersz` is *person “jan” and “pietersz”* |
 | Feedback | Syntax highlighting, a plain-language reading of the query, and messages for unclosed brackets or quotes, unknown fields, and slow wildcards |
 | Tabs and facets | One query for all tabs, each with a count. Facets filter only the active tab and are remembered per tab. The date carries over. Every facet value has a `+` to move it into the search instead |
@@ -37,6 +40,8 @@ python3 -m http.server 8000
 | `suggest.js` | The autocomplete source |
 | `setup.js` | Prototype-only changes to `../config.js`: polities as organisations, clearer labels |
 | `labels.js` | English labels for thesaurus concepts |
+| `concepts.js` | Concept suggestions, counts and hierarchy from the thesaurus index; parsing definitions and external matches |
+| `conceptcard.js` | The cards on the Thesaurus tab |
 | `app.js` | Page state, tabs, facets per tab, the `+` menu, pill options. Cards and facets come from `../render.js` |
 | `../vendor/codemirror.js` | CodeMirror 6 as one ES module (see `../vendor/README.md`) |
 
@@ -55,8 +60,15 @@ python3 -m http.server 8000
 - Fields without a position in the text (`title:`, `year:`, `archive:`, …) can't be used in `( … )~N`
   or `NOT IN`; the prototype says so instead of searching something else.
 - Some concept ids in the indexes have no thesaurus record or JSON-LD (e.g. `e1bd2a95-…`).
-- Only Documents and Persons have facets: the place, ship, organisation, polity and thesaurus indexes hold just `id`, `identifier` and `title`. Persons have no dates yet (`start`/`end` are empty).
+- Only Documents and Persons have facets. Since 13 November 2026 the thesaurus index has labels, definitions, external matches, `related` and hierarchy paths (`facets.concept_hierarchy`); the place, ship, organisation and polity indexes have the same fields, mostly empty. Persons have no dates yet (`start`/`end` are empty).
+- On 13 November 2026 the thesaurus index had 2,634 concepts (8,705 before), and most occupation,
+  status and identity concepts used in persons and documents were missing from it (e.g. *ambtenaar*).
+  Those can't be suggested, though their labels still come from the object store.
+- In the thesaurus index, definitions (`description`) are stored but not searchable, `related` holds
+  labels rather than ids, and the concept schemes themselves have no records, so they have no names.
+- For documents, a broader status or identity finds only places tagged with exactly that concept,
+  not with its narrower ones (the text holds `personId:<concept>`, without paths).
 - There is no rulership index yet.
-- The thesaurus index has one (Dutch) title per concept; the English labels are only in the JSON-LD.
+- The thesaurus index doesn't say which label is preferred or what language each label is in; that is only in the JSON-LD.
 - Persons, ships, organisations and polities have no id in the text yet, so a picked record is
   matched by all of its recorded spellings.
