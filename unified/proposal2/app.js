@@ -26,6 +26,7 @@ import { createEditor } from '../proposal/editor.js';
 import { conceptLabelsEn } from '../proposal/labels.js';
 import { ANY_FIELDS, completionSource } from '../proposal/suggest.js';
 import { conceptCard, conceptCardIds, narrowerConcepts } from '../proposal/conceptcard.js';
+import { activeVariants, expandTree, fetchExpansions, lexicalTerms, offKey } from './expansion.js';
 
 const $ = (selector) => document.querySelector(selector);
 const tabsEl = $('#scope-tabs');
@@ -42,9 +43,11 @@ const filterChipsEl = $('#filter-chips');
 const plusButton = $('#plus-button');
 const plusMenu = $('#plus-menu');
 const popover = $('#pill-popover');
+const expansionEl = $('#expansion');
 
 const emptyFilters = () => Object.fromEntries(SCOPE_KEYS.map((scope) => [scope, []]));
-const state = { q: '', scope: 'documents', page: 1, sort: 'relevance', filters: emptyFilters(), year: '' };
+// `expand`: query expansion on or off. `expandOff`: the variants the user unticked (see expansion.js).
+const state = { q: '', scope: 'documents', page: 1, sort: 'relevance', filters: emptyFilters(), year: '', expand: true, expandOff: new Set() };
 let runToken = 0;
 let current = { query: null, highlightQuery: null, hits: [] };
 
@@ -107,6 +110,7 @@ $('#tool-clear').addEventListener('click', () => {
   state.filters = emptyFilters();
   state.year = '';
   state.scope = 'documents';
+  state.expandOff = new Set();
   runSearch();
   editor.focus();
 });
@@ -255,14 +259,6 @@ function plusMenuHtml() {
         <button type="button" ${insertAttrs('*', 1, false, true)} title="Any letters, e.g. slav*">wildcard *</button>
         <button type="button" ${insertAttrs('~1', 2, false, true)} title="One letter may differ, e.g. timmerman~1">fuzzy ~1</button>
       </div>
-    </div>
-    <div class="menu-section">
-      <h3>Examples</h3>
-      <div class="menu-examples">
-        <button type="button" class="menu-example" data-example-text="documenttype:brief year:1680-1690 (place:Batavia event:Payment)~5">Letters from the 1680s with a payment near Batavia</button>
-        <button type="button" class="menu-example" data-example-text="person:coen" data-example-scope="persons">Person records named Coen</button>
-        <button type="button" class="menu-example" data-example-text="year:1700-1720 person:coen">Documents from 1700–1720 mentioning a Coen</button>
-      </div>
     </div>`;
 }
 
@@ -292,13 +288,6 @@ plusMenu.addEventListener('click', (event) => {
     editor.insert(button.dataset.insert, { cursor: Number(button.dataset.cursor), complete: button.dataset.complete === 'true', raw: button.dataset.raw === 'true' });
     togglePlusMenu(false);
     return;
-  }
-  const example = event.target.closest('[data-example-text]');
-  if (example) {
-    editor.setText(example.dataset.exampleText);
-    state.scope = example.dataset.exampleScope || 'documents';
-    togglePlusMenu(false);
-    submit();
   }
 });
 
@@ -360,6 +349,13 @@ function readUrl() {
   state.sort = params.get('sort') || 'relevance';
   state.year = params.get('year') || '';
   state.filters = emptyFilters();
+  state.expand = params.get('expand') !== 'off';
+  try {
+    const off = JSON.parse(params.get('expandoff') || '[]');
+    state.expandOff = new Set(Array.isArray(off) ? off.filter((key) => typeof key === 'string') : []);
+  } catch (error) {
+    state.expandOff = new Set();
+  }
   try {
     const saved = JSON.parse(params.get('filters') || '{}');
     SCOPE_KEYS.forEach((scope) => {
@@ -379,6 +375,8 @@ function writeUrl({ replace = false } = {}) {
   if (state.year) params.set('year', state.year);
   const used = Object.fromEntries(Object.entries(state.filters).filter(([, chips]) => chips.length));
   if (Object.keys(used).length) params.set('filters', JSON.stringify(used));
+  if (!state.expand) params.set('expand', 'off');
+  if (state.expand && state.expandOff.size) params.set('expandoff', JSON.stringify([...state.expandOff]));
   const url = `${window.location.pathname}${params.toString() ? `?${params}` : ''}`;
   if (url === `${window.location.pathname}${window.location.search}`) return;
   window.history[replace ? 'replaceState' : 'pushState']({}, '', url);
@@ -445,17 +443,29 @@ async function runSearch({ replace = false } = {}) {
   renderFeedback(editor.getText());
   writeUrl({ replace });
   const token = ++runToken;
-  if (!hasSearch()) return;
+  if (!hasSearch()) {
+    expansionEl.hidden = true;
+    return;
+  }
   statusEl.textContent = 'Searching…';
   statusEl.classList.remove('is-error');
   sortWrap.hidden = true;
   paginationEl.innerHTML = '';
 
   // An empty bar with only filters means "everything on this tab, filtered".
-  const tree = parse(state.q || '*');
+  const typed = parse(state.q || '*');
   try {
-    const fieldChips = [...collectFieldNodes(tree), ...Object.values(state.filters).flat()];
-    await Promise.all([resolveChips(fieldChips), resolveVariants(fieldChips)]);
+    const fieldChips = [...collectFieldNodes(typed), ...Object.values(state.filters).flat()];
+    const terms = lexicalTerms(typed);
+    const [expansions] = await Promise.all([
+      state.expand && terms.length ? fetchExpansions(terms) : { byKey: {}, failed: false },
+      resolveChips(fieldChips),
+      resolveVariants(fieldChips),
+    ]);
+    if (token !== runToken) return;
+    renderExpansion(terms, expansions);
+    // The tree that is searched: every lexical term OR its variants that are ticked.
+    const tree = state.expand ? expandTree(typed, expansions.byKey, state.expandOff) : typed;
     const highlightQuery = buildHighlightQuery(tree, state.filters.documents);
     // Tab counts: the query (and the date) only. The active tab also gets its own facet filters.
     const queries = Object.fromEntries(SCOPE_KEYS.map((scope) => [scope, buildQuery(tree, scope === state.scope ? filtersFor(scope) : yearChips(scope), scope)]));
@@ -482,6 +492,109 @@ async function runSearch({ replace = false } = {}) {
     facetsEl.innerHTML = '';
   }
 }
+
+// --- Query expansion ----------------------------------------------------------------------
+//
+// Under the bar: which words were expanded and with what. Every variant can be unticked, per
+// variant, per method (source) or per word. Changes search again at once.
+
+let lastExpansion = { terms: [], byKey: {} };
+let expansionOpen = false;
+
+const checkedState = (count, total) => (count === 0 ? 'none' : count === total ? 'all' : 'some');
+
+function variantsChecked(key, source) {
+  return source.expansions.filter((variant) => !state.expandOff.has(offKey(key, source.id, variant))).length;
+}
+
+function checkbox(attrs, status, label, count) {
+  return `<label class="x-check"><input type="checkbox" ${attrs}${status === 'all' ? ' checked' : ''}${status === 'some' ? ' data-indeterminate="true"' : ''} />${label}${count === undefined ? '' : ` <span class="x-count">${formatCount(count)}</span>`}</label>`;
+}
+
+function renderExpansion(terms, { byKey, failed }) {
+  lastExpansion = { terms, byKey };
+  const expanded = terms.filter((term) => byKey[term.key]);
+  if (!terms.length) {
+    expansionEl.hidden = true;
+    expansionEl.innerHTML = '';
+    return;
+  }
+  const toggle = `<label class="x-switch" title="Spelling variants and synonyms from kweepeer.globalise.nl, for the words you typed. Fields, wildcards and fuzzy words are not expanded."><input type="checkbox" data-x-switch ${state.expand ? 'checked' : ''} /> Expand words</label>`;
+  let summary;
+  if (!state.expand) summary = '<span class="x-summary-text">Off: only the words as typed are searched.</span>';
+  else if (!expanded.length) summary = `<span class="x-summary-text">${failed ? 'The expansion service could not be reached; the words are searched as typed.' : 'No variants found for these words.'}</span>`;
+  else {
+    const parts = expanded.map((term) => {
+      const active = activeVariants(term.key, byKey, state.expandOff).length;
+      return `<strong>${escapeHtml(term.text)}</strong> <span class="x-count">+${formatCount(active)}</span>`;
+    }).join(', ');
+    summary = `<span class="x-summary-text">Also searching variants of ${parts}${failed ? ' <span class="x-warn">(some words could not be expanded)</span>' : ''}</span>`;
+  }
+  const details = state.expand && expanded.length ? expanded.map((term) => {
+    const entry = byKey[term.key];
+    // Counted once each, also when several methods suggest the same variant.
+    const total = new Set(entry.sources.flatMap((source) => source.expansions.map((variant) => variant.toLowerCase()))).size;
+    const checked = activeVariants(term.key, byKey, state.expandOff).length;
+    const sources = entry.sources.map((source) => {
+      const on = variantsChecked(term.key, source);
+      const variants = source.expansions.map((variant) => `<li>${checkbox(`data-x-term="${escapeHtml(term.key)}" data-x-source="${escapeHtml(source.id)}" data-x-variant="${escapeHtml(variant)}"`, state.expandOff.has(offKey(term.key, source.id, variant)) ? 'none' : 'all', escapeHtml(variant))}</li>`).join('');
+      return `<div class="x-source">
+        ${checkbox(`data-x-term="${escapeHtml(term.key)}" data-x-source="${escapeHtml(source.id)}"`, checkedState(on, source.expansions.length), `<span class="x-method">${escapeHtml(source.name)}</span>`, source.expansions.length)}
+        <ul class="x-variants">${variants}</ul>
+      </div>`;
+    }).join('');
+    return `<div class="x-term">
+      ${checkbox(`data-x-term="${escapeHtml(term.key)}"`, checkedState(checked, total), `<strong>${escapeHtml(term.text)}</strong>`, total)}
+      <div class="x-sources">${sources}</div>
+    </div>`;
+  }).join('') : '';
+  expansionEl.innerHTML = `<div class="x-head">${toggle}${summary}${details ? `<button type="button" class="x-more" data-x-open aria-expanded="${expansionOpen}">${expansionOpen ? 'Hide' : 'Show'} variants</button>` : ''}</div>
+    ${details ? `<div class="x-body"${expansionOpen ? '' : ' hidden'}>${details}<p class="x-note">From <a href="https://kweepeer.globalise.nl" target="_blank" rel="noopener">kweepeer</a>. Untick what you don't want; the search updates at once.</p></div>` : ''}`;
+  expansionEl.querySelectorAll('[data-indeterminate]').forEach((input) => {
+    input.indeterminate = true;
+  });
+  expansionEl.hidden = false;
+}
+
+// Turns a set of variants on or off: all on when any is off, otherwise all off.
+function setVariants(items) {
+  const allOn = items.every(([key, source, variant]) => !state.expandOff.has(offKey(key, source, variant)));
+  items.forEach(([key, source, variant]) => {
+    const id = offKey(key, source, variant);
+    if (allOn) state.expandOff.add(id);
+    else state.expandOff.delete(id);
+  });
+}
+
+expansionEl.addEventListener('click', (event) => {
+  const more = event.target.closest('[data-x-open]');
+  if (!more) return;
+  expansionOpen = !expansionOpen;
+  more.setAttribute('aria-expanded', String(expansionOpen));
+  more.textContent = `${expansionOpen ? 'Hide' : 'Show'} variants`;
+  expansionEl.querySelector('.x-body').hidden = !expansionOpen;
+});
+
+expansionEl.addEventListener('change', (event) => {
+  const input = event.target;
+  if (input.matches('[data-x-switch]')) {
+    state.expand = input.checked;
+  } else if (input.dataset.xTerm) {
+    const { xTerm: key, xSource: sourceId, xVariant: variant } = input.dataset;
+    const entry = lastExpansion.byKey[key];
+    if (!entry) return;
+    // A variant goes on or off under every method that suggested it, so it is really (not) searched.
+    const sources = entry.sources.filter((source) => variant !== undefined || !sourceId || source.id === sourceId);
+    const items = sources.flatMap((source) => source.expansions
+      .filter((value) => variant === undefined || value.toLowerCase() === variant.toLowerCase())
+      .map((value) => [key, source.id, value]));
+    setVariants(items);
+  } else {
+    return;
+  }
+  state.page = 1;
+  runSearch();
+});
 
 function unavailableReason(scope) {
   const tree = parse(state.q);

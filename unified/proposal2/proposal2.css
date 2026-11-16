@@ -44,3 +44,32 @@
   .menu-row-note { grid-column: 1; }
 }
 .plus-menu .menu-example { font-family: inherit; }
+
+/* --- Query expansion under the bar ------------------------------------------------------- */
+
+.expansion { margin: 6px 0 4px; font-size: 0.85rem; color: var(--text-2); }
+.x-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; }
+.x-switch { display: inline-flex; align-items: center; gap: 6px; color: var(--text-1); cursor: pointer; white-space: nowrap; }
+.x-summary-text strong { color: var(--text-1); font-weight: 500; }
+.x-count { color: var(--text-3); font-size: 0.78em; font-variant-numeric: tabular-nums; }
+.x-warn { color: #e0a85a; }
+.x-more {
+  background: none; border: 1px solid var(--hairline); color: var(--text-1);
+  font: inherit; font-size: 0.8rem; padding: 2px 8px; cursor: pointer;
+}
+.x-more:hover { background: rgba(255, 255, 255, 0.08); }
+.x-body {
+  margin-top: 8px; padding: 10px 12px;
+  border: 1px solid var(--hairline); background: rgba(255, 255, 255, 0.03);
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 12px 24px;
+}
+.x-term > .x-check { font-size: 0.9rem; color: var(--text-1); }
+.x-sources { margin: 4px 0 0 22px; display: grid; gap: 6px; }
+.x-method { color: var(--text-2); }
+.x-check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.x-check input { margin: 0; accent-color: var(--brand-turquoise); }
+.x-variants { list-style: none; margin: 4px 0 0 22px; padding: 0; display: flex; flex-wrap: wrap; gap: 2px 12px; }
+.x-variants .x-check { color: var(--text-1); font-size: 0.82rem; }
+.x-variants .x-check:has(input:not(:checked)) { color: var(--text-3); text-decoration: line-through; }
+.x-note { grid-column: 1 / -1; margin: 0; font-size: 0.75rem; color: var(--text-3); }
+.x-note a { color: inherit; }
