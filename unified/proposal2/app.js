@@ -158,71 +158,50 @@ const DOCUMENT_OPTIONS = [
   },
 ];
 
-// `mentions`: found in the text of documents. `records`: the reference data, on the thing's own tab.
+// One row per thing. The options find mentions in the documents; `records` is the thing's own tab,
+// where the same query shows the reference data instead.
 const CONTENT_THINGS = [
   {
-    key: 'person', label: 'Persons',
-    mentions: [
+    key: 'person', label: 'Persons', records: 'persons',
+    options: [
       opt('a specific person', 'person:', { field: 'person', hint: 'Pick a person: found by every recorded spelling. Typed without picking: any person whose name contains the text' }),
       opt('any person', 'person:* ', { field: 'person', hint: 'Any word tagged as a person', complete: false }),
-      opt('in a role', 'role:', { field: 'role', hint: 'A role tagged at that spot in the text, e.g. koopman' }),
-      opt('with an occupation', 'profession:', { field: 'profession', hint: 'A person with this occupation (or a narrower one) is mentioned' }),
-      opt('with a status', 'status:', { field: 'status', hint: 'Specific statuses only (weduwe, gevangene, …); broader ones are not tagged' }),
-      opt('with an appellation', 'identity:', { field: 'identity', hint: 'Specific ethno-religious appellations only (Chinees, …)' }),
+      opt('role', 'role:', { field: 'role', hint: 'A role tagged at that spot in the text, e.g. koopman. Documents only' }),
+      opt('occupation', 'profession:', { field: 'profession', hint: 'An occupation or a whole group of them' }),
+      opt('status', 'status:', { field: 'status', hint: 'In documents: specific statuses only (weduwe, gevangene, …); broader ones are not tagged' }),
+      opt('appellation', 'identity:', { field: 'identity', hint: 'Ethno-religious appellation. In documents: specific ones only (Chinees, …)' }),
     ],
-    records: { scope: 'persons', options: [
-      opt('by name', 'person:', { field: 'person', scope: 'persons', hint: 'Person records whose name contains the text, or pick one' }),
-      opt('by occupation', 'profession:', { field: 'profession', scope: 'persons' }),
-      opt('by status', 'status:', { field: 'status', scope: 'persons' }),
-      opt('by appellation', 'identity:', { field: 'identity', scope: 'persons' }),
-    ] },
   },
   {
-    key: 'place', label: 'Places',
-    mentions: [
-      opt('a specific place', 'place:', { field: 'place', hint: 'Pick a place: found where the text is tagged with it' }),
-      opt('any place', 'place:* ', { field: 'place', complete: false }),
-    ],
-    records: { scope: 'places', options: [opt('by name', 'place:', { field: 'place', scope: 'places' })] },
+    key: 'place', label: 'Places', records: 'places',
+    options: [opt('a specific place', 'place:', { field: 'place' }), opt('any place', 'place:* ', { field: 'place', complete: false })],
   },
   {
-    key: 'ship', label: 'Ships',
-    mentions: [
-      opt('a specific ship', 'ship:', { field: 'ship', hint: 'Pick a ship: found by every recorded name' }),
-      opt('any ship or object', 'ship:* ', { field: 'ship', complete: false }),
-    ],
-    records: { scope: 'ships', options: [opt('by name', 'ship:', { field: 'ship', scope: 'ships' })] },
+    key: 'ship', label: 'Ships', records: 'ships',
+    options: [opt('a specific ship', 'ship:', { field: 'ship' }), opt('any ship or object', 'ship:* ', { field: 'ship', complete: false })],
   },
   {
-    key: 'organisation', label: 'Organisations',
-    note: 'Includes polities. Rulerships are not in the index yet.',
-    mentions: [
-      opt('a specific organisation', 'organisation:', { field: 'organisation', hint: 'Pick an organisation or polity: found by every recorded name' }),
-      opt('any group', 'organisation:* ', { field: 'organisation', complete: false }),
-    ],
-    records: { scope: 'organisations', options: [opt('by name', 'organisation:', { field: 'organisation', scope: 'organisations' })] },
+    key: 'organisation', label: 'Organisations', records: 'organisations', note: 'incl. polities',
+    options: [opt('a specific organisation', 'organisation:', { field: 'organisation' }), opt('any group', 'organisation:* ', { field: 'organisation', complete: false })],
   },
   {
-    key: 'annotation', label: 'Events',
-    mentions: [
-      opt('an event type', 'event:', { field: 'annotation', hint: 'e.g. Payment, Voyage, Attack' }),
-      opt('any event', 'event:* ', { field: 'annotation', complete: false }),
-    ],
-    records: null, // events exist only as tags in the text
-    recordsNote: 'only as tags in the text',
+    key: 'annotation', label: 'Events', records: null, note: 'tags in the text only',
+    options: [opt('an event type', 'event:', { field: 'annotation', hint: 'e.g. Payment, Voyage, Attack' }), opt('any event', 'event:* ', { field: 'annotation', complete: false })],
   },
   {
-    key: 'concept', label: 'Concepts',
-    mentions: [opt('a thesaurus concept', 'concept:', { field: 'concept', hint: 'Wherever it is used: persons tagged with it, occupations, document types. Includes its narrower concepts' })],
-    records: { scope: 'concepts', options: [opt('in the thesaurus', 'concept:', { field: 'concept', scope: 'concepts', hint: 'The concept card: labels, hierarchy, definitions' })] },
+    key: 'concept', label: 'Concepts', records: 'concepts',
+    options: [opt('a thesaurus concept', 'concept:', { field: 'concept', hint: 'Wherever it is used. Includes its narrower concepts' })],
   },
 ];
+
+// These don't pick a tab: they keep whichever one you are on (Documents by default).
+CONTENT_THINGS.forEach((thing) => thing.options.forEach((option) => { option.scope = ''; }));
 
 const TAB_LABEL = (scope) => SCOPES[scope]?.label || scope;
 
 function optionHtml(option) {
   const code = option.code || option.text.trim();
-  const title = [option.hint, `Opens the ${TAB_LABEL(option.scope)} tab`].filter(Boolean).join('. ');
+  const title = [option.hint, option.scope && `Opens the ${TAB_LABEL(option.scope)} tab`].filter(Boolean).join('. ');
   return `<button type="button" class="menu-option"${option.field ? ` data-field="${option.field}"` : ''} ${insertAttrs(option.text, option.cursor ?? option.text.length, option.complete, false, option.scope)} title="${escapeHtml(title)}">${escapeHtml(option.label)} <code>${escapeHtml(code)}</code></button>`;
 }
 
@@ -239,26 +218,15 @@ function documentBlockHtml() {
 }
 
 function contentBlockHtml() {
-  const rows = CONTENT_THINGS.map((thing) => `<div class="menu-thing2">
-    <div class="menu-thing2-head"><span class="menu-swatch" data-field="${thing.key}"></span><strong>${escapeHtml(thing.label)}</strong>${thing.note ? `<span class="menu-hint">${escapeHtml(thing.note)}</span>` : ''}</div>
-    <div class="menu-sub">
-      <span class="menu-sub-label">mentioned in documents</span>
-      <span class="menu-row-options">${thing.mentions.map(optionHtml).join('')}</span>
-    </div>
-    <div class="menu-sub">
-      <span class="menu-sub-label">as records${thing.records ? ` <span class="menu-tab">→ ${escapeHtml(TAB_LABEL(thing.records.scope))}</span>` : ''}</span>
-      <span class="menu-row-options">${thing.records ? thing.records.options.map(optionHtml).join('') : `<span class="menu-hint">${escapeHtml(thing.recordsNote || 'none')}</span>`}</span>
-    </div>
+  const rows = CONTENT_THINGS.map((thing) => `<div class="menu-row">
+    <span class="menu-row-label"><span class="menu-swatch" data-field="${thing.key}"></span>${escapeHtml(thing.label)}${thing.note ? ` <span class="menu-hint">${escapeHtml(thing.note)}</span>` : ''}</span>
+    <span class="menu-row-options">${thing.options.map(optionHtml).join('')}${thing.records ? `<button type="button" class="menu-records" data-records="${thing.records}" title="Show the ${escapeHtml(TAB_LABEL(thing.records).toLowerCase())} records instead of documents">records →</button>` : ''}</span>
   </div>`).join('');
   return `<div class="menu-block menu-block-content">
     <h3><span class="menu-step">2</span> What's in them, and the reference data</h3>
-    <p class="menu-note">Everything can be searched as a <strong>mention in the documents</strong> (Documents tab) or as a <strong>record</strong> in the reference data (its own tab). It is the same query either way, so every tab still shows its count; the option only picks the tab you land on.</p>
-    <div class="menu-words-row">
-      <span class="menu-row-label">Words in the text</span>
-      <span class="menu-hint">just type them; see <em>Words</em> for phrases and wildcards</span>
-    </div>
+    <p class="menu-note">Each term finds <strong>mentions in the documents</strong>. The same query also finds the <strong>records</strong> in the reference data, on their own tab: <em>records →</em> takes you there.</p>
     ${rows}
-    <p class="menu-note menu-pick-note"><code>person:…</code> picks a specific record from the suggestions; typed without picking (<code>person:adriaan</code>) it finds every person containing that text. <code>person:*</code> means any person.</p>
+    <p class="menu-note menu-pick-note">Words in the text: just type them. <code>person:…</code> picks a specific record from the suggestions; typed without picking (<code>person:adriaan</code>) it finds every person containing that text. <code>person:*</code> means any person.</p>
   </div>`;
 }
 
@@ -318,6 +286,14 @@ plusMenu.addEventListener('mousedown', (event) => {
   if (event.target.closest('button')) event.preventDefault(); // keep the cursor in the editor
 });
 plusMenu.addEventListener('click', (event) => {
+  const records = event.target.closest('[data-records]');
+  if (records) {
+    selectScope(records.dataset.records);
+    togglePlusMenu(false);
+    if (editor.getText().trim()) submit();
+    else editor.focus();
+    return;
+  }
   const button = event.target.closest('[data-insert]');
   if (button) {
     if (button.dataset.scope) selectScope(button.dataset.scope);
