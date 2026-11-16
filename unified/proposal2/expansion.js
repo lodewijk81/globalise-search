@@ -166,3 +166,82 @@ export function expandTree(tree, byKey, off) {
   };
   return visit(tree);
 }
+
+// --- Keeping requests small -------------------------------------------------------------------
+//
+// search.globalise.nl refuses request bodies over about 11,000 bytes (nginx answers 500, without
+// CORS headers, so the browser reports a CORS error). Expanded queries get long, so:
+// 1. compactQuery merges alternatives that are all query_string on the same field into one
+//    query_string: (slaaf) OR ("slaven") OR … instead of one object per variant.
+// 2. msearchBatched sends the searches of one _msearch in as many requests as needed.
+
+// In bytes, with room to spare: the server's limit is a little under 11,000.
+export const MAX_BODY = 8000;
+
+const isMergeable = (clause) => {
+  const qs = clause?.query_string;
+  return qs && Object.keys(clause).length === 1 && Object.keys(qs).every((key) => ['query', 'default_field', 'default_operator'].includes(key));
+};
+
+// A single word or phrase needs no brackets in `a OR b`; anything longer does.
+const group = (query) => (/^("[^"]*"|[^\s"()]+)$/.test(query) ? query : `(${query})`);
+
+export function compactQuery(node) {
+  if (Array.isArray(node)) return node.map(compactQuery);
+  if (!node || typeof node !== 'object') return node;
+  const out = Object.fromEntries(Object.entries(node).map(([key, value]) => [key, compactQuery(value)]));
+  const bool = out.bool;
+  if (!bool || !Array.isArray(bool.should) || bool.should.length < 2) return out;
+  const onlyShould = Object.keys(bool).every((key) => key === 'should' || (key === 'minimum_should_match' && Number(bool[key]) === 1));
+  if (!onlyShould || Object.keys(out).length !== 1) return out;
+  // Group the query_string clauses by field and operator; leave everything else as it is.
+  const groups = new Map();
+  const rest = [];
+  bool.should.forEach((clause) => {
+    if (!isMergeable(clause)) {
+      rest.push(clause);
+      return;
+    }
+    const { default_field: field, default_operator: operator = 'OR' } = clause.query_string;
+    const id = `${field}\t${operator}`;
+    if (!groups.has(id)) groups.set(id, { field, operator, queries: [] });
+    groups.get(id).queries.push(clause.query_string.query);
+  });
+  const merged = [...groups.values()].map(({ field, operator, queries }) => ({
+    query_string: {
+      query: queries.length === 1 ? queries[0] : queries.map(group).join(' OR '),
+      default_field: field,
+      default_operator: operator,
+    },
+  }));
+  const should = [...merged, ...rest];
+  return should.length === 1 ? should[0] : { bool: { ...bool, should } };
+}
+
+export class QueryTooLargeError extends Error {}
+
+const encoder = new TextEncoder();
+const searchSize = ({ index, body }) => encoder.encode(JSON.stringify({ index })).length + encoder.encode(JSON.stringify(body)).length + 2;
+
+// Like esMsearch, but split over several requests so that each stays under MAX_BODY.
+export async function msearchBatched(esMsearch, searches, signal) {
+  if (searches.some((search) => searchSize(search) > MAX_BODY)) {
+    throw new QueryTooLargeError('A single search is larger than the server accepts.');
+  }
+  const batches = [];
+  let batch = [];
+  let size = 0;
+  searches.forEach((search) => {
+    const next = searchSize(search);
+    if (batch.length && size + next > MAX_BODY) {
+      batches.push(batch);
+      batch = [];
+      size = 0;
+    }
+    batch.push(search);
+    size += next;
+  });
+  if (batch.length) batches.push(batch);
+  const results = await Promise.all(batches.map((items) => esMsearch(items, signal)));
+  return results.flat();
+}

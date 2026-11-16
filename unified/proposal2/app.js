@@ -26,7 +26,7 @@ import { createEditor } from '../proposal/editor.js';
 import { conceptLabelsEn } from '../proposal/labels.js';
 import { ANY_FIELDS, completionSource } from '../proposal/suggest.js';
 import { conceptCard, conceptCardIds, narrowerConcepts } from '../proposal/conceptcard.js';
-import { activeVariants, expandTree, fetchExpansions, lexicalTerms, offKey } from './expansion.js';
+import { activeVariants, compactQuery, expandTree, fetchExpansions, lexicalTerms, msearchBatched, offKey, QueryTooLargeError } from './expansion.js';
 
 const $ = (selector) => document.querySelector(selector);
 const tabsEl = $('#scope-tabs');
@@ -465,10 +465,13 @@ async function runSearch({ replace = false } = {}) {
     if (token !== runToken) return;
     renderExpansion(terms, expansions);
     // The tree that is searched: every lexical term OR its variants that are ticked.
-    const tree = state.expand ? expandTree(typed, expansions.byKey, state.expandOff) : typed;
-    const highlightQuery = buildHighlightQuery(tree, state.filters.documents);
+    // Only in documents: the variants are spellings found in the transcriptions, while the other
+    // tabs search the (curated) names of records. It also keeps those queries small.
+    const expanded = state.expand ? expandTree(typed, expansions.byKey, state.expandOff) : typed;
+    const treeFor = (scope) => (scope === 'documents' ? expanded : typed);
+    const highlightQuery = compactQuery(buildHighlightQuery(expanded, state.filters.documents));
     // Tab counts: the query (and the date) only. The active tab also gets its own facet filters.
-    const queries = Object.fromEntries(SCOPE_KEYS.map((scope) => [scope, buildQuery(tree, scope === state.scope ? filtersFor(scope) : yearChips(scope), scope)]));
+    const queries = Object.fromEntries(SCOPE_KEYS.map((scope) => [scope, compactQuery(buildQuery(treeFor(scope), scope === state.scope ? filtersFor(scope) : yearChips(scope), scope))]));
     const searches = SCOPE_KEYS.filter((scope) => queries[scope]).map((scope) => ({
       scope,
       index: SCOPES[scope].index,
@@ -476,17 +479,19 @@ async function runSearch({ replace = false } = {}) {
         ? searchBody(scope, queries[scope], highlightQuery, { size: PAGE_SIZE, from: (state.page - 1) * PAGE_SIZE, sort: state.sort })
         : { size: 0, track_total_hits: true, query: queries[scope] },
     }));
-    const responses = await esMsearch(searches);
+    const responses = await msearchBatched(esMsearch, searches);
     if (token !== runToken) return;
     const byScope = {};
     searches.forEach((search, index) => {
       byScope[search.scope] = responses[index];
     });
-    await renderOutcome(byScope, queries, tree, highlightQuery, token);
+    await renderOutcome(byScope, queries, treeFor(state.scope), highlightQuery, token);
   } catch (error) {
     if (token !== runToken) return;
     console.error(error);
-    statusEl.textContent = 'The search could not be completed. Please try again.';
+    statusEl.textContent = error instanceof QueryTooLargeError
+      ? 'This search is too long for the server. Untick some expanded variants under the search bar, or switch off Expand words.'
+      : 'The search could not be completed. Please try again.';
     statusEl.classList.add('is-error');
     resultsEl.innerHTML = '';
     facetsEl.innerHTML = '';
@@ -519,7 +524,7 @@ function renderExpansion(terms, { byKey, failed }) {
     expansionEl.innerHTML = '';
     return;
   }
-  const toggle = `<label class="x-switch" title="Spelling variants and synonyms from kweepeer.globalise.nl, for the words you typed. Fields, wildcards and fuzzy words are not expanded."><input type="checkbox" data-x-switch ${state.expand ? 'checked' : ''} /> Expand words</label>`;
+  const toggle = `<label class="x-switch" title="Spelling variants and synonyms from kweepeer.globalise.nl, for the words you typed, searched in the text of documents. Fields, wildcards and fuzzy words are not expanded; other tabs search names as typed."><input type="checkbox" data-x-switch ${state.expand ? 'checked' : ''} /> Expand words</label>`;
   let summary;
   if (!state.expand) summary = '<span class="x-summary-text">Off: only the words as typed are searched.</span>';
   else if (!expanded.length) summary = `<span class="x-summary-text">${failed ? 'The expansion service could not be reached; the words are searched as typed.' : 'No variants found for these words.'}</span>`;
@@ -528,7 +533,7 @@ function renderExpansion(terms, { byKey, failed }) {
       const active = activeVariants(term.key, byKey, state.expandOff).length;
       return `<strong>${escapeHtml(term.text)}</strong> <span class="x-count">+${formatCount(active)}</span>`;
     }).join(', ');
-    summary = `<span class="x-summary-text">Also searching variants of ${parts}${failed ? ' <span class="x-warn">(some words could not be expanded)</span>' : ''}</span>`;
+    summary = `<span class="x-summary-text">In documents, also searching variants of ${parts}${failed ? ' <span class="x-warn">(some words could not be expanded)</span>' : ''}</span>`;
   }
   const details = state.expand && expanded.length ? expanded.map((term) => {
     const entry = byKey[term.key];
@@ -804,7 +809,7 @@ async function fetchExactCounts(token) {
   const singleDocQuery = (id) => ({ bool: { filter: [{ ids: { values: [id] } }], must: [query] } });
   let responses;
   try {
-    responses = await esMsearch(pending.map(({ hit }) => ({ index: 'documents', body: { size: 1, _source: false, query: singleDocQuery(hit._id), highlight: documentHighlight(highlightQuery, 0, 0) } })));
+    responses = await msearchBatched(esMsearch, pending.map(({ hit }) => ({ index: 'documents', body: { size: 1, _source: false, query: singleDocQuery(hit._id), highlight: documentHighlight(highlightQuery, 0, 0) } })));
   } catch (error) {
     return;
   }

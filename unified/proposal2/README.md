@@ -42,8 +42,15 @@ embeddings). dev.globalise.nl uses `kweepeer.dev.huc.knaw.nl`; this prototype us
   words (`timmerman~1`), numbers and both sides of `NOT IN` (a single span query) are not.
   kweepeer's own parser reads `person:coen` as words and drops wildcards, so `expansion.js` sends
   it one term at a time from our own parse tree. Results are cached per term.
-- The search is then the same tree with every term replaced by `(term OR "variant" OR …)`. The
-  variants apply on every tab and are highlighted in the snippets.
+- The search is then the same tree with every term replaced by `(term OR "variant" OR …)`, on
+  the **Documents** tab only: the variants are spellings found in the transcriptions, while the
+  other tabs search the curated names of records, which are searched as typed. The variants are
+  highlighted in the snippets.
+- **Request size.** search.globalise.nl refuses request bodies over about 11,000 bytes (nginx
+  answers 500 without CORS headers, so the browser shows a CORS error). So the alternatives are
+  merged into one `query_string` (`compactQuery`), and the searches for the tabs are split over
+  several `_msearch` requests of at most 8,000 bytes (`msearchBatched`). A single search that is
+  still too long (around 10 or more expanded words) gets a message asking to untick variants.
 - Under the bar: **Expand words** (on or off), the expanded words with how many variants are on,
   and **Show variants**: checkboxes per word, per method and per variant. A variant suggested by
   both methods goes on or off under both. Every change searches again. The choices are kept in
