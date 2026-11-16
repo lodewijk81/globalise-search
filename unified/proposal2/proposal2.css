@@ -1,0 +1,51 @@
+/* The + menu, version 2: which documents / what's in them. Loaded after ../proposal/proposal.css. */
+
+.plus-menu { max-width: 1100px; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
+
+.menu-block { padding: 4px 0 10px; }
+.menu-block + .menu-block { margin-top: 6px; padding-top: 10px; border-top: 2px solid var(--hairline); }
+.menu-block h3 { display: flex; align-items: center; gap: 8px; font-size: 0.78rem; color: var(--text-1); }
+.menu-step {
+  display: inline-grid; place-items: center;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--brand-turquoise, #2bb3a3); color: #111; font-size: 0.7rem; font-weight: 700;
+}
+.menu-block-documents {
+  margin: 0 -8px; padding: 4px 8px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 4px;
+}
+
+.menu-row, .menu-words-row, .menu-sub {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 2px 10px;
+  padding: 3px 0;
+}
+.menu-row + .menu-row { border-top: 1px solid var(--hairline); }
+.menu-row-label { font-size: 0.85rem; font-weight: 500; }
+.menu-row-options { display: flex; flex-wrap: wrap; gap: 4px; }
+.menu-row-note { grid-column: 2; margin: 2px 0 0; font-size: 0.75rem; }
+
+.menu-thing2 { padding: 6px 0; border-top: 1px solid var(--hairline); }
+.menu-thing2-head { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+.menu-thing2-head strong { font-weight: 500; font-size: 0.88rem; }
+.menu-sub { padding: 1px 0 1px 14px; grid-template-columns: 176px minmax(0, 1fr); }
+.menu-sub-label { font-size: 0.75rem; color: var(--text-2); }
+.menu-tab { color: var(--text-3); white-space: nowrap; }
+.menu-words-row { border-top: 1px solid var(--hairline); padding: 6px 0; }
+.menu-pick-note { margin-top: 8px; }
+
+.plus-menu button.menu-option {
+  font-family: inherit;
+  border-left: 3px solid var(--chip-color, var(--hairline));
+}
+.menu-option code { color: var(--text-3); font-size: 0.75rem; }
+.menu-examples { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+
+@media (max-width: 860px) {
+  .menu-row, .menu-words-row, .menu-sub { grid-template-columns: minmax(0, 1fr); }
+  .menu-row-note { grid-column: 1; }
+}
+.plus-menu .menu-example { font-family: inherit; }
