@@ -23,8 +23,8 @@ The structural terms are split in two:
    any, role, occupation, status, appellation), places, ships, organisations, events and concepts.
    The terms find mentions in the documents. The query language has no separate syntax for records:
    `person:coen` means documents mentioning Coen on the Documents tab and Coen's records on the
-   Persons tab. So the intro says this once, and each row ends with **records →**, which switches to
-   that tab (and searches again if the bar has text). Events have no records. The terms in this part
+   Persons tab. The intro says this once; the tabs above the results take you to the records. Events
+   have no records. The terms in this part
    keep whichever tab you are on; the "Which documents" terms switch to Documents.
 
 Combine, Words and Examples are as in version 1.

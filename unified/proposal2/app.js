@@ -158,11 +158,11 @@ const DOCUMENT_OPTIONS = [
   },
 ];
 
-// One row per thing. The options find mentions in the documents; `records` is the thing's own tab,
-// where the same query shows the reference data instead.
+// One row per thing. The options find mentions in the documents; on the thing's own tab the same
+// query shows the records in the reference data.
 const CONTENT_THINGS = [
   {
-    key: 'person', label: 'Persons', records: 'persons',
+    key: 'person', label: 'Persons',
     options: [
       opt('a specific person', 'person:', { field: 'person', hint: 'Pick a person: found by every recorded spelling. Typed without picking: any person whose name contains the text' }),
       opt('any person', 'person:* ', { field: 'person', hint: 'Any word tagged as a person', complete: false }),
@@ -173,23 +173,23 @@ const CONTENT_THINGS = [
     ],
   },
   {
-    key: 'place', label: 'Places', records: 'places',
+    key: 'place', label: 'Places',
     options: [opt('a specific place', 'place:', { field: 'place' }), opt('any place', 'place:* ', { field: 'place', complete: false })],
   },
   {
-    key: 'ship', label: 'Ships', records: 'ships',
+    key: 'ship', label: 'Ships',
     options: [opt('a specific ship', 'ship:', { field: 'ship' }), opt('any ship or object', 'ship:* ', { field: 'ship', complete: false })],
   },
   {
-    key: 'organisation', label: 'Organisations', records: 'organisations', note: 'incl. polities',
+    key: 'organisation', label: 'Organisations', note: 'incl. polities',
     options: [opt('a specific organisation', 'organisation:', { field: 'organisation' }), opt('any group', 'organisation:* ', { field: 'organisation', complete: false })],
   },
   {
-    key: 'annotation', label: 'Events', records: null, note: 'tags in the text only',
+    key: 'annotation', label: 'Events', note: 'tags in the text only',
     options: [opt('an event type', 'event:', { field: 'annotation', hint: 'e.g. Payment, Voyage, Attack' }), opt('any event', 'event:* ', { field: 'annotation', complete: false })],
   },
   {
-    key: 'concept', label: 'Concepts', records: 'concepts',
+    key: 'concept', label: 'Concepts',
     options: [opt('a thesaurus concept', 'concept:', { field: 'concept', hint: 'Wherever it is used. Includes its narrower concepts' })],
   },
 ];
@@ -220,11 +220,11 @@ function documentBlockHtml() {
 function contentBlockHtml() {
   const rows = CONTENT_THINGS.map((thing) => `<div class="menu-row">
     <span class="menu-row-label"><span class="menu-swatch" data-field="${thing.key}"></span>${escapeHtml(thing.label)}${thing.note ? ` <span class="menu-hint">${escapeHtml(thing.note)}</span>` : ''}</span>
-    <span class="menu-row-options">${thing.options.map(optionHtml).join('')}${thing.records ? `<button type="button" class="menu-records" data-records="${thing.records}" title="Show the ${escapeHtml(TAB_LABEL(thing.records).toLowerCase())} records instead of documents">records →</button>` : ''}</span>
+    <span class="menu-row-options">${thing.options.map(optionHtml).join('')}</span>
   </div>`).join('');
   return `<div class="menu-block menu-block-content">
     <h3><span class="menu-step">2</span> What's in them, and the reference data</h3>
-    <p class="menu-note">Each term finds <strong>mentions in the documents</strong>. The same query also finds the <strong>records</strong> in the reference data, on their own tab: <em>records →</em> takes you there.</p>
+    <p class="menu-note">Each term finds <strong>mentions in the documents</strong>. The same query also finds the <strong>records</strong> in the reference data, on their own tab.</p>
     ${rows}
     <p class="menu-note menu-pick-note">Words in the text: just type them. <code>person:…</code> picks a specific record from the suggestions; typed without picking (<code>person:adriaan</code>) it finds every person containing that text. <code>person:*</code> means any person.</p>
   </div>`;
@@ -286,14 +286,6 @@ plusMenu.addEventListener('mousedown', (event) => {
   if (event.target.closest('button')) event.preventDefault(); // keep the cursor in the editor
 });
 plusMenu.addEventListener('click', (event) => {
-  const records = event.target.closest('[data-records]');
-  if (records) {
-    selectScope(records.dataset.records);
-    togglePlusMenu(false);
-    if (editor.getText().trim()) submit();
-    else editor.focus();
-    return;
-  }
   const button = event.target.closest('[data-insert]');
   if (button) {
     if (button.dataset.scope) selectScope(button.dataset.scope);
