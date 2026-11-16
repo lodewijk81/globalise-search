@@ -61,9 +61,10 @@ python3 -m http.server 8000
   or `NOT IN`; the prototype says so instead of searching something else.
 - Some concept ids in the indexes have no thesaurus record or JSON-LD (e.g. `e1bd2a95-…`).
 - Only Documents and Persons have facets. Since 13 November 2026 the thesaurus index has labels, definitions, external matches, `related` and hierarchy paths (`facets.concept_hierarchy`); the place, ship, organisation and polity indexes have the same fields, mostly empty. Persons have no dates yet (`start`/`end` are empty).
-- On 13 November 2026 the thesaurus index had 2,634 concepts (8,705 before), and most occupation,
-  status and identity concepts used in persons and documents were missing from it (e.g. *ambtenaar*).
-  Those can't be suggested, though their labels still come from the object store.
+- The thesaurus index has all 8,706 concepts of the 17 schemes. A few concept ids used in documents
+  (8 occupations, in 184 documents) have no thesaurus record anywhere.
+- About 76 concepts carry editorial markers in their labels, mostly `[PROBLEMATIC TERM]` (also
+  `[REVIEW]`, `[ADD DEF]`); the prototype shows them as they are.
 - In the thesaurus index, definitions (`description`) are stored but not searchable, `related` holds
   labels rather than ids, and the concept schemes themselves have no records, so they have no names.
 - For documents, a broader status or identity finds only places tagged with exactly that concept,
