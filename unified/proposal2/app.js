@@ -15,7 +15,7 @@ import '../proposal/setup.js';
 import { FIELD_BY_KEY, FRAGMENT_CAP, MAX_RESULT_WINDOW, PAGE_SIZE, SCOPES, SCOPE_KEYS, SORTS } from '../config.js';
 import {
   archiveNodeLabel, conceptUsage, countOf, esMsearch, esSearch, facetAggs, fetchArchiveChildren,
-  personLabels, placeLabels, resolveChips, splitTitles, thumbnailUrl,
+  inventoryManifest, personLabels, placeLabels, resolveChips, splitTitles, thumbnailUrl, viewerUrl,
 } from '../api.js';
 import {
   annotatedToHtml, archiveTree, countHits, documentCard, documentFacets, escapeHtml, formatCount, legendHtml, objectCard,
@@ -27,6 +27,7 @@ import { conceptLabelsEn } from '../proposal/labels.js';
 import { ANY_FIELDS, completionSource } from '../proposal/suggest.js';
 import { conceptCard, conceptCardIds, narrowerConcepts } from '../proposal/conceptcard.js';
 import { activeVariants, compactQuery, expandTree, fetchExpansions, lexicalTerms, msearchBatched, offKey, QueryTooLargeError } from './expansion.js';
+import { cropUrl, documentScans, fractions, locate, positionsBody, scanImage, scanNumber } from './scans.js';
 
 const $ = (selector) => document.querySelector(selector);
 const tabsEl = $('#scope-tabs');
@@ -433,6 +434,7 @@ function searchBody(scope, query, highlightQuery, { size, from = 0, sort = 'rele
   const chosen = (SORTS[scope] || []).find((option) => option.key === sort);
   if (chosen?.sort) body.sort = chosen.sort;
   const aggs = facetAggs(scope);
+  if (aggs && scope === 'documents') delete aggs.professions; // not shown on the documents tab
   if (aggs) body.aggs = aggs;
   return body;
 }
@@ -684,10 +686,15 @@ async function renderOutcome(byScope, queries, tree, highlightQuery, token) {
 async function buildFacets(scope, aggs, total) {
   if (!aggs) return '';
   if (scope === 'documents') {
-    const leaves = [...(aggs.professions?.buckets || []), ...(aggs.documentTypes?.buckets || [])].map((bucket) => bucket.key.split('|').pop());
+    // No occupation facet on documents; document type is shown even when the index has none for
+    // these results (a language facet is to follow).
+    const leaves = (aggs.documentTypes?.buckets || []).map((bucket) => bucket.key.split('|').pop());
     const labelOf = await conceptLabelsEn(leaves);
     const roots = (aggs.archive?.buckets || []).map(toArchiveNode);
-    return documentFacets(aggs, labelOf, roots, state.year, total).replace('<h3>Profession</h3>', '<h3>Occupation</h3>');
+    return documentFacets(aggs, labelOf, roots, state.year, total, {
+      professions: false,
+      emptyDocTypes: 'None of these documents has a document type in the index yet.',
+    });
   }
   if (scope === 'persons') {
     const ids = [...(aggs.occupations?.buckets || []), ...(aggs.statuses?.buckets || []), ...(aggs.identities?.buckets || [])].map((bucket) => bucket.key.split('|').pop());
@@ -756,6 +763,7 @@ function renderPagination(total) {
 function afterRender(token) {
   if (!current.hits.length) return;
   fillThumbnails(current.hits);
+  prepareSnippets(current.hits);
   nameAnnotations(resultsEl).catch(() => {});
   fillDocTypes(resultsEl).catch(() => {});
   fetchExactCounts(token);
@@ -772,6 +780,108 @@ function fillThumbnails(hits) {
     image.loading = 'lazy';
     link.replaceChildren(image);
   });
+}
+
+// --- Snippets on their scans (see scans.js) ------------------------------------------------
+//
+// Every snippet gets the number of its scan (a link to the viewer at that scan) and a strip of
+// the scan with the lines it is on. A card is worked out when it comes near the screen.
+
+const CROP_HEIGHT = 96; // css pixels, at most
+const POSITION_BATCH = 6; // fragments per position request (requests must stay small)
+const snippetFragments = new WeakMap(); // <p class="result-snippet"> -> raw highlight fragment
+let snippetObserver = null;
+
+function prepareSnippets(hits) {
+  snippetObserver?.disconnect();
+  snippetObserver = 'IntersectionObserver' in window
+    ? new IntersectionObserver((entries) => entries.forEach((entry) => {
+      if (!entry.isIntersecting) return;
+      snippetObserver.unobserve(entry.target);
+      locateSnippets(entry.target);
+    }), { rootMargin: '400px 0px' })
+    : null;
+  hits.forEach((hit, index) => {
+    const card = resultsEl.querySelector(`.card-document[data-index="${index}"]`);
+    if (!card) return;
+    const fragments = hit.highlight?.annotatedText || [];
+    card.querySelectorAll('.result-snippet:not(.is-empty)').forEach((paragraph, i) => attachSnippet(paragraph, fragments[i]));
+    if (snippetObserver) snippetObserver.observe(card);
+    else locateSnippets(card);
+  });
+}
+
+function attachSnippet(paragraph, fragment) {
+  if (!fragment) return;
+  snippetFragments.set(paragraph, fragment);
+  const label = document.createElement('a');
+  label.className = 'scan-tag is-pending';
+  label.textContent = 'Scan …';
+  label.target = '_blank';
+  label.rel = 'noopener noreferrer';
+  paragraph.prepend(label);
+}
+
+// Locates the snippets of a card that haven't been yet (or the given ones), in text order, so
+// each can start looking from the scan of the one before.
+async function locateSnippets(card, paragraphs) {
+  const hit = current.hits[Number(card.dataset.index)];
+  const todo = (paragraphs || [...card.querySelectorAll('.result-snippet')]).filter((p) => snippetFragments.has(p) && !p.dataset.located);
+  if (!hit || !todo.length) return;
+  todo.forEach((p) => { p.dataset.located = 'pending'; });
+  const fragments = todo.map((p) => snippetFragments.get(p));
+  const batches = [];
+  for (let i = 0; i < fragments.length; i += POSITION_BATCH) batches.push(fragments.slice(i, i + POSITION_BATCH));
+  const [manifest, responses] = await Promise.all([
+    inventoryManifest(hit._source.inventoryNumber),
+    msearchBatched(esMsearch, batches.map((batch) => ({ index: 'documents', body: positionsBody(hit._id, batch) }))).catch(() => []),
+  ]);
+  const where = batches.flatMap((batch, i) => fractions(responses[i]?.hits?.hits?.[0]?.fields?.positions, batch.length));
+  const scans = documentScans(hit._source, manifest);
+  let hint = null;
+  for (const [i, paragraph] of todo.entries()) {
+    if (!card.isConnected) return; // a new search replaced the results
+    const found = await locate(fragments[i], scans, where[i], hint).catch(() => null);
+    if (found) hint = found.position;
+    showScan(paragraph, hit._source, manifest, scans, found);
+  }
+}
+
+function showScan(paragraph, doc, manifest, scans, found) {
+  const label = paragraph.querySelector(':scope > .scan-tag');
+  paragraph.dataset.located = found ? 'yes' : 'no';
+  const url = viewerUrl(doc, found?.scan);
+  paragraph.dataset.viewer = url;
+  if (!label) return;
+  label.href = url;
+  label.classList.remove('is-pending');
+  if (!found) {
+    label.textContent = 'Scan ?';
+    label.title = 'This passage could not be found on a scan. Opens the first scan of the document.';
+    return;
+  }
+  label.textContent = `Scan ${scanNumber(found.scan)}`;
+  label.title = `${found.scan}: scan ${found.position + 1} of ${scans.length} in this document. Open it in the viewer.`;
+  const src = cropUrl(scanImage(manifest, found.scan), found.region, 1000, 2 * CROP_HEIGHT);
+  if (!src) return;
+  // No box around the hit word: the word outlines in the transcriptions are approximate (often a
+  // word off), while the line outlines that give the strip are reliable.
+  const { region } = found;
+  const crop = document.createElement('a');
+  crop.className = 'snippet-crop';
+  crop.href = url;
+  crop.target = '_blank';
+  crop.rel = 'noopener noreferrer';
+  crop.setAttribute('aria-label', `Scan ${scanNumber(found.scan)} in the viewer`);
+  crop.style.aspectRatio = `${region.w} / ${region.h}`;
+  crop.style.width = `min(100%, ${Math.round((CROP_HEIGHT * region.w) / region.h)}px)`;
+  const image = document.createElement('img');
+  image.src = src;
+  image.alt = '';
+  image.loading = 'lazy';
+  image.addEventListener('error', () => crop.remove());
+  crop.append(image);
+  paragraph.before(crop);
 }
 
 async function nameAnnotations(root) {
@@ -844,14 +954,18 @@ async function showMore(button) {
     });
     const fragments = data.hits?.hits?.[0]?.highlight?.annotatedText || [];
     const list = button.parentElement;
-    button.before(...fragments.slice(FRAGMENT_CAP).map((fragment) => {
+    const card = button.closest('.card-document');
+    const added = fragments.slice(FRAGMENT_CAP).map((fragment) => {
       const paragraph = document.createElement('p');
       paragraph.className = 'result-snippet';
       paragraph.innerHTML = annotatedToHtml(fragment);
+      attachSnippet(paragraph, fragment);
       return paragraph;
-    }));
+    });
+    button.before(...added);
     button.remove();
     nameAnnotations(list).catch(() => {});
+    if (card) locateSnippets(card, added);
   } catch (error) {
     button.disabled = false;
     button.textContent = label;
@@ -964,6 +1078,12 @@ document.addEventListener('click', (event) => {
   const annotation = target.closest('.ann');
   if (annotation) {
     addToQuery(annotationChip(annotation), { scope: 'documents' });
+    return;
+  }
+  // The rest of a snippet opens its scan in the viewer (not when text is being selected).
+  const snippet = target.closest('.result-snippet[data-viewer]');
+  if (snippet && !target.closest('a, button') && !window.getSelection()?.toString()) {
+    window.open(snippet.dataset.viewer, '_blank', 'noopener');
     return;
   }
   const scopeTab = target.closest('.scope-tab');

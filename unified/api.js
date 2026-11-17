@@ -104,8 +104,9 @@ const firstScanId = (name) => {
 
 const manifestUrl = (inventory) => `https://data.globalise.huygens.knaw.nl/hdl:20.500.14722/inventory:${inventory}.manifest`;
 
-export function viewerUrl(doc) {
-  const scan = firstScanId(doc.name);
+// The viewer at a scan of the document: its first scan unless another is given.
+export function viewerUrl(doc, scanId) {
+  const scan = scanId || firstScanId(doc.name);
   if (!scan || !doc.inventoryNumber) return '#';
   const params = new URLSearchParams({
     manifest: manifestUrl(doc.inventoryNumber),
@@ -114,18 +115,24 @@ export function viewerUrl(doc) {
   return `https://dev.globalise.nl/manifest?${params}`;
 }
 
-export async function thumbnailUrl(doc) {
-  const scan = firstScanId(doc.name);
-  if (!scan || !doc.inventoryNumber) return '';
-  if (!manifestCache.has(doc.inventoryNumber)) {
+// The IIIF manifest of an inventory (all its scans), fetched once per session; null if it fails.
+export function inventoryManifest(inventory) {
+  if (!inventory) return Promise.resolve(null);
+  if (!manifestCache.has(inventory)) {
     manifestCache.set(
-      doc.inventoryNumber,
-      fetch(manifestUrl(doc.inventoryNumber), { headers: { Accept: 'application/json' } })
+      inventory,
+      fetch(manifestUrl(inventory), { headers: { Accept: 'application/json' } })
         .then((response) => (response.ok ? response.json() : null))
         .catch(() => null)
     );
   }
-  const manifest = await manifestCache.get(doc.inventoryNumber);
+  return manifestCache.get(inventory);
+}
+
+export async function thumbnailUrl(doc) {
+  const scan = firstScanId(doc.name);
+  if (!scan || !doc.inventoryNumber) return '';
+  const manifest = await inventoryManifest(doc.inventoryNumber);
   const canvas = manifest?.items?.find((item) => typeof item?.id === 'string' && item.id.endsWith(scan));
   const body = canvas?.items?.[0]?.items?.[0]?.body;
   return body?.id ? body.id.replace('/full/max/', '/full/400,/') : '';

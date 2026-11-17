@@ -360,17 +360,22 @@ export function archiveTree(nodes) {
     .join('')}</ul>`;
 }
 
-export function documentFacets(aggs, labelOf, archiveNodes, activeYear, total) {
+// Options: `professions` (default true) shows the profession facet; `emptyDocTypes`, when set, is
+// a note shown under "Document type" when there is nothing to list, instead of leaving it out.
+export function documentFacets(aggs, labelOf, archiveNodes, activeYear, total, { professions = true, emptyDocTypes = '' } = {}) {
   const settlements = (aggs.settlements?.buckets || [])
     .filter((bucket) => bucket.key)
     .slice(0, 12)
     .map((bucket) => ({ label: bucket.key, count: bucket.doc_count, chip: { fieldKey: 'settlement', value: bucket.key, id: bucket.key } }));
   const docTypes = (aggs.documentTypes?.buckets || []).map((bucket) => ({ ...bucket, leaf: bucket.key.split('|').length }));
+  const docTypeItems = conceptItems(docTypes, labelOf, 'documenttype', 10, total);
   return [
     timeline(aggs.years?.buckets || [], activeYear),
     facetList('Settlement', settlements, 'settlement'),
-    facetList('Profession', conceptItems(aggs.professions?.buckets || [], labelOf, 'profession', 10, total), 'profession'),
-    facetList('Document type', conceptItems(docTypes, labelOf, 'documenttype', 10, total), 'documenttype'),
+    professions ? facetList('Profession', conceptItems(aggs.professions?.buckets || [], labelOf, 'profession', 10, total), 'profession') : '',
+    docTypeItems.length || !emptyDocTypes
+      ? facetList('Document type', docTypeItems, 'documenttype')
+      : `<section class="facet"><h3>Document type</h3><p class="muted-note">${escapeHtml(emptyDocTypes)}</p></section>`,
     archiveNodes.length ? `<section class="facet"><h3>Archive</h3><div class="tree">${archiveTree(archiveNodes)}</div></section>` : '',
   ].join('');
 }
