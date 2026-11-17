@@ -112,7 +112,7 @@ export function viewerUrl(doc, scanId) {
     manifest: manifestUrl(doc.inventoryNumber),
     canvas: `https://data.globalise.huygens.knaw.nl/hdl:20.500.14722/canvas:${scan}`,
   });
-  return `https://dev.globalise.nl/manifest?${params}`;
+  return `https://globalise.nl/manifest?${params}`;
 }
 
 // The IIIF manifest of an inventory (all its scans), fetched once per session; null if it fails.

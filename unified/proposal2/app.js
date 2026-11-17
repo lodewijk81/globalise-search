@@ -626,7 +626,7 @@ function renderTabs(byScope, queries) {
 }
 
 async function cardsFor(scope, hits, tree) {
-  if (scope === 'documents') return hits.map((hit, index) => documentCard(hit, index, FRAGMENT_CAP, { thumb: false })).join('');
+  if (scope === 'documents') return hits.map((hit, index) => documentCard(hit, index, FRAGMENT_CAP, { thumb: false, newTab: false })).join('');
   const terms = plainTerms(tree, []);
   if (scope === 'persons') {
     const ids = hits.flatMap((hit) => personIds(hit._source));
@@ -806,15 +806,11 @@ function attachSnippet(paragraph, fragment) {
   row.className = 'snippet-row';
   const thumb = document.createElement('a');
   thumb.className = 'snippet-thumb is-pending';
-  thumb.target = '_blank';
-  thumb.rel = 'noopener noreferrer';
   thumb.setAttribute('aria-hidden', 'true'); // the scan tag is the accessible link
   thumb.tabIndex = -1;
   const label = document.createElement('a');
   label.className = 'scan-tag is-pending';
   label.textContent = 'Scan …';
-  label.target = '_blank';
-  label.rel = 'noopener noreferrer';
   paragraph.replaceWith(row);
   paragraph.prepend(label);
   row.append(thumb, paragraph);
@@ -1079,7 +1075,7 @@ document.addEventListener('click', (event) => {
   // The rest of a snippet opens its scan in the viewer (not when text is being selected).
   const snippet = target.closest('.result-snippet[data-viewer]');
   if (snippet && !target.closest('a, button') && !window.getSelection()?.toString()) {
-    window.open(snippet.dataset.viewer, '_blank', 'noopener');
+    window.location.assign(snippet.dataset.viewer);
     return;
   }
   const scopeTab = target.closest('.scope-tab');

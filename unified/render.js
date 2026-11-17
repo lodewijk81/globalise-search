@@ -114,8 +114,10 @@ function matchBadge(count, isExact, id) {
   return `<span class="hit-badge" id="${id}">${label}</span>`;
 }
 
-// Options: `thumb` (default true) shows a thumbnail of the document's first scan.
-export function documentCard(hit, index, cap, { thumb = true } = {}) {
+// Options: `thumb` (default true) shows a thumbnail of the document's first scan; `newTab`
+// (default true) opens the viewer links in a new tab.
+export function documentCard(hit, index, cap, { thumb = true, newTab = true } = {}) {
+  const target = newTab ? ' target="_blank" rel="noopener noreferrer"' : '';
   const doc = hit._source;
   const fragments = hit.highlight?.annotatedText || [];
   const hits = fragments.reduce((sum, fragment) => sum + countHits(fragment), 0);
@@ -134,12 +136,12 @@ export function documentCard(hit, index, cap, { thumb = true } = {}) {
 
   return `
     <article class="card card-document${thumb ? '' : ' card-no-thumb'}" data-doc-id="${escapeHtml(hit._id)}" data-index="${index}">
-      ${thumb ? `<a class="card-thumb" href="${url}" target="_blank" rel="noopener noreferrer" data-thumb="${index}" aria-label="Open ${escapeHtml(doc.name)} in the viewer">
+      ${thumb ? `<a class="card-thumb" href="${url}"${target} data-thumb="${index}" aria-label="Open ${escapeHtml(doc.name)} in the viewer">
         <span class="thumb-placeholder">Scan</span>
       </a>` : ''}
       <div class="card-body">
         <header class="card-head">
-          <h2 class="card-title"><a href="${url}" target="_blank" rel="noopener noreferrer">${escapeHtml(doc.title || doc.name)}</a></h2>
+          <h2 class="card-title"><a href="${url}"${target}>${escapeHtml(doc.title || doc.name)}</a></h2>
           ${matchBadge(hits, isExact, `hits-${index}`)}
         </header>
         <div class="card-meta">${meta.map((part) => `<span>${part}</span>`).join('<span class="dot">·</span>')}</div>
@@ -148,7 +150,7 @@ export function documentCard(hit, index, cap, { thumb = true } = {}) {
         <div class="result-snippets">${snippets}<button type="button" class="link-button" id="more-${index}" hidden></button></div>
         <footer class="card-actions">
           <button type="button" class="link-button" data-reader="${index}" aria-expanded="false">Read annotated text</button>
-          <a href="${url}" target="_blank" rel="noopener noreferrer">Open in viewer</a>
+          <a href="${url}"${target}>Open in viewer</a>
           <span class="card-id">${escapeHtml(doc.name)}</span>
         </footer>
         <div class="reader" id="reader-${index}" hidden></div>

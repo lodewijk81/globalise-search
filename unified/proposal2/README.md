@@ -65,7 +65,8 @@ The embedding variants are mostly HTR spellings (`slaaff`, `slaafp`) but also in
 
 On the **Documents** tab there is no thumbnail for the document as a whole. Instead every snippet
 has a thumbnail of the scan it is on, and the scan's number (`Scan 371`). The thumbnail, the
-number and the snippet text all open the viewer at that scan (`viewerUrl(doc, scan)`).
+number and the snippet text all open the viewer on globalise.nl at that scan
+(`viewerUrl(doc, scan)`), in the same tab, as do the document's title and "Open in viewer".
 Annotations in the snippet still add themselves to the search. The code is in `scans.js`.
 
 The documents index stores the text of a whole document without scan boundaries, so the scan is
