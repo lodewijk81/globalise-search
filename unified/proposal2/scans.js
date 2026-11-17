@@ -1,16 +1,14 @@
-// Which scan a snippet is on, and where on the scan: for the link to the viewer, the scan number
-// and a crop of the scan next to the snippet.
+// Which scan a snippet is on: for the link to the viewer, the scan number and a thumbnail of that
+// scan next to the snippet.
 //
 // The documents index has the text of a whole document, without scan boundaries. So:
 // 1. Elasticsearch gives the position of each snippet in that text (a script field on the
 //    document, one small request per card). The position divided by the length is a first guess
 //    at the scan: a document of 20 scans with the snippet halfway is probably on its 10th scan.
-// 2. The transcription of that scan (the line and word annotations with their outlines, from the
-//    object store) is searched for the words of the snippet around the first hit. If they are not
-//    there, the neighbouring scans are tried, nearest first.
-// 3. The outlines of the matched lines give the region of the scan to show, cut out by the IIIF
-//    image service. Word outlines are only used to centre a long line on the hit: they are
-//    approximate (often a word off), so they aren't drawn.
+// 2. The transcription of that scan (the word annotations, from the object store) is searched for
+//    the words of the snippet around the first hit. If they are not there, the neighbouring scans
+//    are tried, nearest first.
+// 3. The thumbnail is the whole scan, from its IIIF image service (in the inventory's manifest).
 //
 // The plain text of the inventory with a text range per scan (in the manifest) would give the
 // scan without guessing, but the ranges don't match the published text at the moment, and the
@@ -19,7 +17,6 @@
 const TRANSCRIPTIONS = 'https://objectstore.surf.nl/87435b768620494e8e911c83d1997f24:globalise-data/annotations/transcriptions';
 const MAX_TRIES = 30; // scans looked at per snippet at most (nearest first; usually 1 or 2)
 const CONTEXT = 5; // words on either side of the hit that are compared
-const MAX_CROP_WIDTH = 2400; // canvas pixels, about a page column
 const CONCURRENCY = 6;
 const TIMEOUT_MS = 10000;
 
@@ -51,14 +48,14 @@ export function scanNumber(scan) {
   return match ? `${Number(match[1])}${match[2]}` : scan;
 }
 
-// The image service and size of a scan, from the manifest.
-export function scanImage(manifest, scan) {
+// A thumbnail of a whole scan, `height` pixels high, from its IIIF image service in the manifest.
+// Height rather than width, because a scan can be one page or a two-page spread.
+export function scanThumbnail(manifest, scan, height = 240) {
   const canvas = (manifest?.items || []).find((item) => canvasScan(item.id) === scan);
   const body = canvas?.items?.[0]?.items?.[0]?.body;
   const service = [].concat(body?.service || [])[0];
   const id = service?.id || service?.['@id'];
-  if (!id) return null;
-  return { service: id, width: body.width || canvas.width, height: body.height || canvas.height, canvasWidth: canvas.width, canvasHeight: canvas.height };
+  return id ? `${id}/full/,${height}/0/default.jpg` : '';
 }
 
 // --- Snippets ------------------------------------------------------------------------------
@@ -144,30 +141,12 @@ async function limited(task) {
   }
 }
 
-// The points of an SvgSelector path ("M x,y x,y …z") as a bounding box.
-function boxOf(target) {
-  const svg = [].concat(target || []).map((part) => part?.selector).find((selector) => selector?.type === 'SvgSelector')?.value;
-  const numbers = (svg?.match(/-?\d+(\.\d+)?/g) || []).map(Number);
-  if (numbers.length < 4) return null;
-  let [x0, y0, x1, y1] = [Infinity, Infinity, -Infinity, -Infinity];
-  for (let i = 0; i + 1 < numbers.length; i += 2) {
-    x0 = Math.min(x0, numbers[i]); x1 = Math.max(x1, numbers[i]);
-    y0 = Math.min(y0, numbers[i + 1]); y1 = Math.max(y1, numbers[i + 1]);
-  }
-  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
-}
-
+// The words of a scan, in reading order.
 function parsePage(data) {
-  const lines = new Map(); // line id -> box
-  const words = [];
-  (data?.items || []).forEach((item) => {
-    if (item.textGranularity === 'line') lines.set(item.id, boxOf(item.target));
-    if (item.textGranularity !== 'word') return;
-    const text = [].concat(item.body || []).find((body) => body?.value)?.value || '';
-    const line = [].concat(item.target || []).map((part) => (typeof part === 'string' ? part : part?.id)).find((id) => lines.has(id));
-    words.push({ norm: normalize(text), box: boxOf(item.target), line });
-  });
-  return { words: words.filter((word) => word.norm), lines };
+  const words = (data?.items || [])
+    .filter((item) => item.textGranularity === 'word')
+    .map((item) => ({ norm: normalize([].concat(item.body || []).find((body) => body?.value)?.value || '') }));
+  return { words: words.filter((word) => word.norm) };
 }
 
 export function scanTranscription(scan) {
@@ -254,7 +233,7 @@ function tryOrder(count, guess, hint) {
   return order.slice(0, MAX_TRIES);
 }
 
-// Where a fragment is: { scan, position (0-based in the document), region } or null.
+// Where a fragment is: { scan, position (0-based in the document) } or null.
 // `hint` is the scan index of the snippet before it in the same document, if known.
 export async function locate(fragment, scans, fraction, hint = null) {
   if (!scans.length) return null;
@@ -270,48 +249,5 @@ export async function locate(fragment, scans, fraction, hint = null) {
     if (best && best.match.score >= best.match.of * 0.75) break; // good enough; don't fetch more
   }
   if (!best) return null;
-  return { scan: scans[best.index], position: best.index, ...cropOf(best.page, best.match) };
-}
-
-// The lines with the matched words, as one region with some margin.
-function cropOf(page, match) {
-  const { index, anchor, from, to } = match;
-  const lineIds = new Set();
-  for (let k = index - (anchor - from); k < index + (to - anchor); k += 1) {
-    if (page.words[k]?.line) lineIds.add(page.words[k].line);
-  }
-  // At most two lines either side of the hit's line, so the crop stays a strip.
-  const hitLine = page.words[index].line;
-  const ordered = [...page.lines.keys()];
-  const at = ordered.indexOf(hitLine);
-  const boxes = [...lineIds]
-    .filter((id) => at < 0 || Math.abs(ordered.indexOf(id) - at) <= 1)
-    .map((id) => page.lines.get(id))
-    .filter(Boolean);
-  if (!boxes.length && page.words[index].box) boxes.push(page.words[index].box);
-  if (!boxes.length) return { region: null };
-  let x0 = Math.min(...boxes.map((b) => b.x));
-  const y0 = Math.min(...boxes.map((b) => b.y));
-  let x1 = Math.max(...boxes.map((b) => b.x + b.w));
-  const y1 = Math.max(...boxes.map((b) => b.y + b.h));
-  // Long lines (a line across both pages of a spread) are cut to a window around the hit, so the
-  // strip stays readable when it is scaled down.
-  const mark = page.words[index].box;
-  const maxWidth = Math.max(MAX_CROP_WIDTH, (y1 - y0) * 5);
-  if (mark && x1 - x0 > maxWidth) {
-    const centre = mark.x + mark.w / 2;
-    x0 = Math.max(x0, Math.min(centre - maxWidth / 2, x1 - maxWidth));
-    x1 = x0 + maxWidth;
-  }
-  const pad = 30;
-  return { region: { x: Math.max(0, x0 - pad), y: Math.max(0, y0 - pad), w: x1 - x0 + 2 * pad, h: y1 - y0 + 2 * pad } };
-}
-
-// The IIIF URL of a region (in canvas coordinates), scaled to fit `width` x `height` pixels.
-export function cropUrl(image, region, width = 900, height = 200) {
-  if (!image || !region) return '';
-  const sx = image.width && image.canvasWidth ? image.width / image.canvasWidth : 1;
-  const sy = image.height && image.canvasHeight ? image.height / image.canvasHeight : 1;
-  const r = [region.x * sx, region.y * sy, region.w * sx, region.h * sy].map((n) => Math.max(0, Math.round(n)));
-  return `${image.service}/${r.join(',')}/!${width},${height}/0/default.jpg`;
+  return { scan: scans[best.index], position: best.index };
 }

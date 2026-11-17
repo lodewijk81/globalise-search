@@ -63,10 +63,10 @@ The embedding variants are mostly HTR spellings (`slaaff`, `slaafp`) but also in
 
 ## Snippets on their scans
 
-Every snippet on the **Documents** tab shows the number of the scan it is on (`Scan 371`) and a
-strip of that scan with the lines it comes from. The scan number, the strip and the snippet text
-open the viewer at that scan (`viewerUrl(doc, scan)`). Annotations in the snippet still add
-themselves to the search. The code is in `scans.js`.
+On the **Documents** tab there is no thumbnail for the document as a whole. Instead every snippet
+has a thumbnail of the scan it is on, and the scan's number (`Scan 371`). The thumbnail, the
+number and the snippet text all open the viewer at that scan (`viewerUrl(doc, scan)`).
+Annotations in the snippet still add themselves to the search. The code is in `scans.js`.
 
 The documents index stores the text of a whole document without scan boundaries, so the scan is
 found like this:
@@ -74,27 +74,24 @@ found like this:
 1. **Position.** A `script_fields` script on the document returns where each snippet starts in
    `annotatedText`, as a fraction of its length (one small request per card, in `_msearch`
    batches). A snippet halfway through a 20-scan document is probably on about its 10th scan.
-2. **Check.** The transcription of that scan (line and word annotations with outlines,
+2. **Check.** The transcription of that scan (its word annotations,
    `objectstore.surf.nl/…/annotations/transcriptions/<scan>.json`, about 40 KB gzipped) is
    searched for the words around the snippet's first hit. If they are not there, it tries the
    previous snippet's scan, then scans further and further from the guess, up to 30. The guess
    can be well off: tables and empty pages hold little text.
-3. **Strip.** The outlines of the matched lines (at most three) give the region, cut out by the
-   IIIF image service of the scan (from the inventory's manifest). Long lines across a two-page
-   spread are cut to about 2,400 px around the hit.
+3. **Thumbnail.** The whole scan, 240 px high, from its IIIF image service (in the inventory's
+   manifest), fitted into a fixed box (scans are single pages or two-page spreads).
 
 Cards are worked out when they come near the screen; transcriptions are cached and at most six
 are fetched at once. In a test of 4 searches × 10 documents × 3 snippets (17 November 2026), 119
 of 120 snippets were located, on average in 70–550 ms per card. The one missed was in a
-183-scan document; a snippet that can't be located shows `Scan ?` and links to the first scan.
+183-scan document; a snippet that can't be located shows `Scan ?`, links to the first scan and
+has no thumbnail.
 
-Notes:
-- The hit word is not boxed on the strip: the word outlines in the transcriptions are
-  approximate (often a word off). The line outlines are reliable.
-- The manifest also has, per scan, a character range in the plain text of the inventory
-  (`inventory:<n>.txt`), which would give the scan without guessing. But the ranges don't match
-  the published text at the moment (for 4054_0369 they are about 370 characters off), and the
-  file is stored gzipped, so it can't be read in parts.
+Note: the manifest also has, per scan, a character range in the plain text of the inventory
+(`inventory:<n>.txt`), which would give the scan without guessing. But the ranges don't match the
+published text at the moment (for 4054_0369 they are about 370 characters off), and the file is
+stored gzipped, so it can't be read in parts.
 
 ## Facets on the documents tab
 

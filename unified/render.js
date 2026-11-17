@@ -114,7 +114,8 @@ function matchBadge(count, isExact, id) {
   return `<span class="hit-badge" id="${id}">${label}</span>`;
 }
 
-export function documentCard(hit, index, cap) {
+// Options: `thumb` (default true) shows a thumbnail of the document's first scan.
+export function documentCard(hit, index, cap, { thumb = true } = {}) {
   const doc = hit._source;
   const fragments = hit.highlight?.annotatedText || [];
   const hits = fragments.reduce((sum, fragment) => sum + countHits(fragment), 0);
@@ -132,10 +133,10 @@ export function documentCard(hit, index, cap) {
   ].filter(Boolean);
 
   return `
-    <article class="card card-document" data-doc-id="${escapeHtml(hit._id)}" data-index="${index}">
-      <a class="card-thumb" href="${url}" target="_blank" rel="noopener noreferrer" data-thumb="${index}" aria-label="Open ${escapeHtml(doc.name)} in the viewer">
+    <article class="card card-document${thumb ? '' : ' card-no-thumb'}" data-doc-id="${escapeHtml(hit._id)}" data-index="${index}">
+      ${thumb ? `<a class="card-thumb" href="${url}" target="_blank" rel="noopener noreferrer" data-thumb="${index}" aria-label="Open ${escapeHtml(doc.name)} in the viewer">
         <span class="thumb-placeholder">Scan</span>
-      </a>
+      </a>` : ''}
       <div class="card-body">
         <header class="card-head">
           <h2 class="card-title"><a href="${url}" target="_blank" rel="noopener noreferrer">${escapeHtml(doc.title || doc.name)}</a></h2>

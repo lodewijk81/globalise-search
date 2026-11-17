@@ -15,7 +15,7 @@ import '../proposal/setup.js';
 import { FIELD_BY_KEY, FRAGMENT_CAP, MAX_RESULT_WINDOW, PAGE_SIZE, SCOPES, SCOPE_KEYS, SORTS } from '../config.js';
 import {
   archiveNodeLabel, conceptUsage, countOf, esMsearch, esSearch, facetAggs, fetchArchiveChildren,
-  inventoryManifest, personLabels, placeLabels, resolveChips, splitTitles, thumbnailUrl, viewerUrl,
+  inventoryManifest, personLabels, placeLabels, resolveChips, splitTitles, viewerUrl,
 } from '../api.js';
 import {
   annotatedToHtml, archiveTree, countHits, documentCard, documentFacets, escapeHtml, formatCount, legendHtml, objectCard,
@@ -27,7 +27,7 @@ import { conceptLabelsEn } from '../proposal/labels.js';
 import { ANY_FIELDS, completionSource } from '../proposal/suggest.js';
 import { conceptCard, conceptCardIds, narrowerConcepts } from '../proposal/conceptcard.js';
 import { activeVariants, compactQuery, expandTree, fetchExpansions, lexicalTerms, msearchBatched, offKey, QueryTooLargeError } from './expansion.js';
-import { cropUrl, documentScans, fractions, locate, positionsBody, scanImage, scanNumber } from './scans.js';
+import { documentScans, fractions, locate, positionsBody, scanNumber, scanThumbnail } from './scans.js';
 
 const $ = (selector) => document.querySelector(selector);
 const tabsEl = $('#scope-tabs');
@@ -626,7 +626,7 @@ function renderTabs(byScope, queries) {
 }
 
 async function cardsFor(scope, hits, tree) {
-  if (scope === 'documents') return hits.map((hit, index) => documentCard(hit, index, FRAGMENT_CAP)).join('');
+  if (scope === 'documents') return hits.map((hit, index) => documentCard(hit, index, FRAGMENT_CAP, { thumb: false })).join('');
   const terms = plainTerms(tree, []);
   if (scope === 'persons') {
     const ids = hits.flatMap((hit) => personIds(hit._source));
@@ -758,36 +758,22 @@ function renderPagination(total) {
     <button type="button" data-page="${state.page + 1}"${state.page >= lastPage ? ' disabled' : ''}>Next</button>`;
 }
 
-// --- Cards: thumbnails, counts, "show more", reader (as in ../app.js) ----------------------
+// --- Cards: counts, "show more", reader (as in ../app.js) ----------------------
 
 function afterRender(token) {
   if (!current.hits.length) return;
-  fillThumbnails(current.hits);
   prepareSnippets(current.hits);
   nameAnnotations(resultsEl).catch(() => {});
   fillDocTypes(resultsEl).catch(() => {});
   fetchExactCounts(token);
 }
 
-function fillThumbnails(hits) {
-  hits.forEach(async (hit, index) => {
-    const url = await thumbnailUrl(hit._source);
-    const link = resultsEl.querySelector(`[data-thumb="${index}"]`);
-    if (!url || !link) return;
-    const image = document.createElement('img');
-    image.src = url;
-    image.alt = '';
-    image.loading = 'lazy';
-    link.replaceChildren(image);
-  });
-}
-
 // --- Snippets on their scans (see scans.js) ------------------------------------------------
 //
-// Every snippet gets the number of its scan (a link to the viewer at that scan) and a strip of
-// the scan with the lines it is on. A card is worked out when it comes near the screen.
+// Every snippet gets a thumbnail of the scan it is on and the scan's number; both, and the snippet
+// itself, open the viewer at that scan. There is no thumbnail for the document as a whole. A card
+// is worked out when it comes near the screen.
 
-const CROP_HEIGHT = 96; // css pixels, at most
 const POSITION_BATCH = 6; // fragments per position request (requests must stay small)
 const snippetFragments = new WeakMap(); // <p class="result-snippet"> -> raw highlight fragment
 let snippetObserver = null;
@@ -811,15 +797,27 @@ function prepareSnippets(hits) {
   });
 }
 
+// Wraps a snippet in a row with a thumbnail placeholder (filled in by showScan) and puts the
+// scan-number tag in front of the text.
 function attachSnippet(paragraph, fragment) {
   if (!fragment) return;
   snippetFragments.set(paragraph, fragment);
+  const row = document.createElement('div');
+  row.className = 'snippet-row';
+  const thumb = document.createElement('a');
+  thumb.className = 'snippet-thumb is-pending';
+  thumb.target = '_blank';
+  thumb.rel = 'noopener noreferrer';
+  thumb.setAttribute('aria-hidden', 'true'); // the scan tag is the accessible link
+  thumb.tabIndex = -1;
   const label = document.createElement('a');
   label.className = 'scan-tag is-pending';
   label.textContent = 'Scan …';
   label.target = '_blank';
   label.rel = 'noopener noreferrer';
+  paragraph.replaceWith(row);
   paragraph.prepend(label);
+  row.append(thumb, paragraph);
 }
 
 // Locates the snippets of a card that haven't been yet (or the given ones), in text order, so
@@ -849,39 +847,37 @@ async function locateSnippets(card, paragraphs) {
 
 function showScan(paragraph, doc, manifest, scans, found) {
   const label = paragraph.querySelector(':scope > .scan-tag');
+  const thumb = paragraph.parentElement?.querySelector(':scope > .snippet-thumb');
   paragraph.dataset.located = found ? 'yes' : 'no';
   const url = viewerUrl(doc, found?.scan);
   paragraph.dataset.viewer = url;
-  if (!label) return;
-  label.href = url;
-  label.classList.remove('is-pending');
+  [label, thumb].forEach((link) => {
+    if (!link) return;
+    link.href = url;
+    link.classList.remove('is-pending');
+  });
   if (!found) {
-    label.textContent = 'Scan ?';
-    label.title = 'This passage could not be found on a scan. Opens the first scan of the document.';
+    if (label) {
+      label.textContent = 'Scan ?';
+      label.title = 'This passage could not be found on a scan. Opens the first scan of the document.';
+    }
+    if (thumb) thumb.title = label?.title || '';
     return;
   }
-  label.textContent = `Scan ${scanNumber(found.scan)}`;
-  label.title = `${found.scan}: scan ${found.position + 1} of ${scans.length} in this document. Open it in the viewer.`;
-  const src = cropUrl(scanImage(manifest, found.scan), found.region, 1000, 2 * CROP_HEIGHT);
-  if (!src) return;
-  // No box around the hit word: the word outlines in the transcriptions are approximate (often a
-  // word off), while the line outlines that give the strip are reliable.
-  const { region } = found;
-  const crop = document.createElement('a');
-  crop.className = 'snippet-crop';
-  crop.href = url;
-  crop.target = '_blank';
-  crop.rel = 'noopener noreferrer';
-  crop.setAttribute('aria-label', `Scan ${scanNumber(found.scan)} in the viewer`);
-  crop.style.aspectRatio = `${region.w} / ${region.h}`;
-  crop.style.width = `min(100%, ${Math.round((CROP_HEIGHT * region.w) / region.h)}px)`;
+  const title = `${found.scan}: scan ${found.position + 1} of ${scans.length} in this document. Open it in the viewer.`;
+  if (label) {
+    label.textContent = `Scan ${scanNumber(found.scan)}`;
+    label.title = title;
+  }
+  const src = scanThumbnail(manifest, found.scan, 240);
+  if (!thumb || !src) return;
+  thumb.title = title;
   const image = document.createElement('img');
   image.src = src;
   image.alt = '';
   image.loading = 'lazy';
-  image.addEventListener('error', () => crop.remove());
-  crop.append(image);
-  paragraph.before(crop);
+  image.addEventListener('error', () => image.remove());
+  thumb.replaceChildren(image);
 }
 
 async function nameAnnotations(root) {
@@ -959,10 +955,10 @@ async function showMore(button) {
       const paragraph = document.createElement('p');
       paragraph.className = 'result-snippet';
       paragraph.innerHTML = annotatedToHtml(fragment);
-      attachSnippet(paragraph, fragment);
       return paragraph;
     });
     button.before(...added);
+    added.forEach((paragraph, i) => attachSnippet(paragraph, fragments[FRAGMENT_CAP + i])); // once in the page: it wraps them
     button.remove();
     nameAnnotations(list).catch(() => {});
     if (card) locateSnippets(card, added);
