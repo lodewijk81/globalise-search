@@ -1,13 +1,15 @@
 <!doctype html>
 <html lang="en">
   <head>
+    <!-- Same page as ../proposal2/ (that link was shared); the code lives there. -->
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>GLOBALISE – Query syntax prototype</title>
+    <title>GLOBALISE – Query syntax prototype 2</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="../../styles.css" />
     <link rel="stylesheet" href="../unified.css" />
-    <link rel="stylesheet" href="proposal.css" />
+    <link rel="stylesheet" href="../proposal/proposal.css" />
+    <link rel="stylesheet" href="../proposal2/proposal2.css" />
   </head>
   <body data-mode="home">
     <div class="prototype-banner" role="note">
@@ -39,6 +41,8 @@
         <p class="readback" id="readback" hidden></p>
         <ul class="diagnostics" id="diagnostics" hidden></ul>
       </div>
+
+      <div class="expansion results-only" id="expansion" aria-live="polite" hidden></div>
 
       <div class="filter-row results-only" id="filter-row" hidden>
         <span class="filter-row-label">Filters on this tab</span>
@@ -76,6 +80,6 @@
 
     <div class="pill-popover" id="pill-popover" role="dialog" aria-label="Search term options" hidden></div>
 
-    <script type="module" src="app.js"></script>
+    <script type="module" src="../proposal2/app.js"></script>
   </body>
 </html>

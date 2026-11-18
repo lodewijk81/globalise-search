@@ -6,6 +6,9 @@ query expansion. Only `app.js` (the menu and the expansion panel), `expansion.js
 (query parsing, editor, suggestions, concept cards, `setup.js`) is imported from `../proposal/`, so
 fixes there apply here too.
 
+`../proposal/` shows this same page (its `index.html` loads this `app.js`), so both links that
+were shared keep working. Change the page here.
+
 ```bash
 cd /path/to/globalise-search
 python3 -m http.server 8000

@@ -11,6 +11,13 @@ python3 -m http.server 8000
 # open http://localhost:8000/unified/proposal/
 ```
 
+> **Since 18 November 2026 this URL shows the same page as [`../proposal2/`](../proposal2/README.md)**
+> (the second version of the **+** menu, query expansion, snippets on their scans). `index.html`
+> here loads `../proposal2/app.js` and `../proposal2/proposal2.css`; the version 1 `app.js` is gone
+> (it is in the git history). The shared modules below (`query.js`, `editor.js`, `suggest.js`,
+> `conceptcard.js`, `labels.js`, `setup.js`, `proposal.css`) are still here and used by both URLs.
+> Where this README describes the version 1 **+** menu, see `../proposal2/README.md` instead.
+
 ## What it shows
 
 | Proposal | In the prototype |
@@ -42,7 +49,7 @@ python3 -m http.server 8000
 | `labels.js` | English labels for thesaurus concepts |
 | `concepts.js` | Concept suggestions, counts and hierarchy from the thesaurus index; parsing definitions and external matches |
 | `conceptcard.js` | The cards on the Thesaurus tab |
-| `app.js` | Page state, tabs, facets per tab, the `+` menu, pill options. Cards and facets come from `../render.js` |
+| `app.js` (removed; now `../proposal2/app.js`) | Page state, tabs, facets per tab, the `+` menu, pill options. Cards and facets come from `../render.js` |
 | `../vendor/codemirror.js` | CodeMirror 6 as one ES module (see `../vendor/README.md`) |
 
 ## What we learned building it
