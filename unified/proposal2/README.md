@@ -103,3 +103,11 @@ Year, settlement, document type and archive. There is no occupation facet on doc
 on persons). Document type is always shown: in the index of 5 November 2026 only 24 documents
 have a type (`documentTypeIdPaths`), though the document records themselves often have one
 (`classified_as`), so it mostly says that there are none yet. A language facet is to follow.
+
+## Thesaurus tab: definitions
+
+Words typed in the bar find concepts by their name and also by words in their definitions
+(`description`, searchable since the index rebuild of 16 November 2026), weighted lower so that
+name matches come first (`objectWord` in `../proposal/query.js`). On 18 November 2026: `timor`
+finds 52 concepts (was 1), `"lord of"` 13 (was 0), `rice` 32 (was 2). The autocomplete and
+`title:` still search names only.

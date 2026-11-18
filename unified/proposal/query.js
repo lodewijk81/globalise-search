@@ -557,10 +557,30 @@ export function fieldClause(chip, scope, mode = 'filter') {
 
 // --- Per-index clauses for free text ------------------------------------------------------
 
-function objectWord(word) {
+function objectTitleWord(word) {
   if (word.startsWith('"')) return { match_phrase: { title: word.replace(/^"|"$/g, '') } };
   if (hasWildcard(word) || /~\d*$/.test(word)) return queryString([word], 'title');
   return { bool: { should: [{ match: { title: { query: word, boost: 3 } } }, { prefix: { title: { value: word.toLowerCase() } } }], minimum_should_match: 1 } };
+}
+
+// Thesaurus concepts are also found by words in their definitions (`description`, searchable
+// since the rebuild of 16 November 2026), weighted below the name so name matches rank first.
+const DESCRIPTION_BOOST = 0.3;
+
+function conceptDescriptionWord(word) {
+  if (word.startsWith('"')) return { match_phrase: { description: { query: word.replace(/^"|"$/g, ''), boost: DESCRIPTION_BOOST } } };
+  if (hasWildcard(word) || /~\d*$/.test(word)) {
+    const clause = queryString([word], 'description');
+    clause.query_string.boost = DESCRIPTION_BOOST;
+    return clause;
+  }
+  return { match: { description: { query: word, boost: DESCRIPTION_BOOST } } };
+}
+
+function objectWord(word, scope) {
+  const title = objectTitleWord(word);
+  if (scope !== 'concepts') return title;
+  return { bool: { should: [title, conceptDescriptionWord(word)], minimum_should_match: 1 } };
 }
 
 function personWord(word) {
@@ -577,8 +597,7 @@ function personWord(word) {
 function wordsClause(words, scope) {
   if (words.length === 1 && words[0] === '*') return { match_all: {} };
   if (scope === 'documents') return queryString(words, TEXT);
-  const make = scope === 'persons' ? personWord : objectWord;
-  const clauses = words.map(make);
+  const clauses = words.map((word) => (scope === 'persons' ? personWord(word) : objectWord(word, scope)));
   return clauses.length === 1 ? clauses[0] : { bool: { must: clauses } };
 }
 
