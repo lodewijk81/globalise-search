@@ -104,15 +104,17 @@ const firstScanId = (name) => {
 
 const manifestUrl = (inventory) => `https://data.globalise.huygens.knaw.nl/hdl:20.500.14722/inventory:${inventory}.manifest`;
 
-// The viewer at a scan of the document: its first scan unless another is given.
+// The viewer at a scan of the document: its first scan unless another is given. The path names
+// the inventory and the scan's page number (the last part of its id, e.g. NL-HaNA_1.04.02_1053_0002
+// → 1053/0002); the canvas parameter names the scan in full.
 export function viewerUrl(doc, scanId) {
   const scan = scanId || firstScanId(doc.name);
   if (!scan || !doc.inventoryNumber) return '#';
+  const page = scan.split('_').pop();
   const params = new URLSearchParams({
-    manifest: manifestUrl(doc.inventoryNumber),
     canvas: `https://data.globalise.huygens.knaw.nl/hdl:20.500.14722/canvas:${scan}`,
   });
-  return `https://globalise.nl/manifest?${params}`;
+  return `https://globalise.nl/hdl:20.500.14722/inventory:${encodeURIComponent(doc.inventoryNumber)}/${page}?${params}`;
 }
 
 // The IIIF manifest of an inventory (all its scans), fetched once per session; null if it fails.
