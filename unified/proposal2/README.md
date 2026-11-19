@@ -69,8 +69,30 @@ The embedding variants are mostly HTR spellings (`slaaff`, `slaafp`) but also in
 On the **Documents** tab there is no thumbnail for the document as a whole. Instead every snippet
 has a thumbnail of the scan it is on, and the scan's number (`Scan 371`). The thumbnail, the
 number and the snippet text all open the viewer on globalise.nl at that scan
-(`viewerUrl(doc, scan)`), in the same tab, as do the document's title and "Open in viewer".
+(`viewerUrl(doc, scan, highlight)`), in the same tab, as do the document's title and "Open in viewer".
 Annotations in the snippet still add themselves to the search. The code is in `scans.js`.
+
+### Highlighting on the scan
+
+From a snippet, the viewer highlights the search on the scan and marks that snippet's hit, as it
+does for links from globalise.nl/search. The viewer's route reads these query parameters (from its
+code, 19 November 2026; the path `inventory:1053/0002` is only for show):
+
+| Parameter | Value |
+| --- | --- |
+| `manifest` | The inventory's IIIF manifest. Without it the viewer opens inventory 1053 |
+| `canvas` | The scan, when the prototype found it. Without it the viewer finds the scan from the snippet |
+| `q` | A query in the portal's search syntax. The viewer runs it on the document and highlights every hit |
+| `document`, `documentId` | The document name (`NL-HaNA_1.04.02_2060_0577-0597`), for both |
+| `snippet` | Text that must lie within one of the viewer's own highlight fragments around a hit, or it says *Search result could not be located* and highlights nothing |
+
+The prototype's syntax (pills, `NOT IN`, proximity, regions) has no equivalent in the portal's, so
+`q` is the words highlighted in the card's snippets, quoted and joined by `OR` (`hitQuery`). The
+viewer then highlights those words in the whole document, also where they wouldn't match the
+prototype's query (e.g. *Batavia* that isn't tagged as a place, for `place:Batavia`). Whole
+snippets often fail because the viewer's fragments end elsewhere, so `snippet` is about 30
+characters on either side of the snippet's first hit (`snippetText`). The viewer sometimes draws
+its "current hit" marker a few characters off; links from globalise.nl/search do the same.
 
 The documents index stores the text of a whole document without scan boundaries, so the scan is
 found like this:

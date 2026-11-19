@@ -108,15 +108,26 @@ const manifestUrl = (inventory) => `https://data.globalise.huygens.knaw.nl/hdl:2
 // the inventory and the scan's page number (the last part of its id, e.g. NL-HaNA_1.04.02_1053_0002
 // → 1053/0002), but the viewer only reads the query: `manifest` picks the inventory (without it the
 // viewer falls back to inventory 1053) and `canvas` the scan.
-export function viewerUrl(doc, scanId) {
-  const scan = scanId || firstScanId(doc.name);
-  if (!scan || !doc.inventoryNumber) return '#';
-  const page = scan.split('_').pop();
-  const params = new URLSearchParams({
-    manifest: manifestUrl(doc.inventoryNumber),
-    canvas: `https://data.globalise.huygens.knaw.nl/hdl:20.500.14722/canvas:${scan}`,
-  });
-  return `https://globalise.nl/hdl:20.500.14722/inventory:${encodeURIComponent(doc.inventoryNumber)}/${page}?${params}`;
+//
+// With `highlight` ({ q, snippet }) the viewer also highlights the search on the scan, as links
+// from globalise.nl/search do: it runs `q` on the document (`document`, `documentId`: its name)
+// and opens the scan with `snippet` on it, marking that hit. Without a known scan the link names
+// the whole document and leaves finding the scan to the viewer.
+export function viewerUrl(doc, scanId, highlight = null) {
+  const withHighlight = Boolean(highlight?.q && highlight?.snippet && doc.name);
+  const scan = scanId || (withHighlight ? null : firstScanId(doc.name));
+  if (!doc.inventoryNumber || !(scan || withHighlight)) return '#';
+  const params = new URLSearchParams();
+  if (withHighlight) params.set('q', highlight.q);
+  params.set('manifest', manifestUrl(doc.inventoryNumber));
+  if (scan) params.set('canvas', `https://data.globalise.huygens.knaw.nl/hdl:20.500.14722/canvas:${scan}`);
+  if (withHighlight) {
+    params.set('document', doc.name);
+    params.set('documentId', doc.name);
+    params.set('snippet', highlight.snippet);
+  }
+  const pages = scan ? scan.split('_').pop() : doc.name.split('_').pop();
+  return `https://globalise.nl/hdl:20.500.14722/inventory:${encodeURIComponent(doc.inventoryNumber)}/${pages}?${params}`;
 }
 
 // The IIIF manifest of an inventory (all its scans), fetched once per session; null if it fails.

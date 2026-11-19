@@ -68,6 +68,52 @@ export function unhighlight(fragment) {
     .replace(/\((?:_hit_term=[^&)]*&)+/g, '(');
 }
 
+// The snippet for the viewer's link (see hitQuery): a few words of plain text around the first hit
+// in the fragment. The viewer only finds a snippet that lies within one of its own highlight
+// fragments around a hit, and those don't end where ours do, so the whole fragment often fails;
+// a short piece around a hit is found. Annotation markup is dropped, also where the fragment
+// starts or ends inside an annotation ("…atavia](type%3APlace) van" or "[Batavia](_hit_ter").
+const SNIPPET_CONTEXT = 30; // characters on each side of the hit, extended to whole words
+export function snippetText(fragment) {
+  const cleaned = String(fragment)
+    .replace(/^([^[\]]*)\]\([^)]*\)/, '$1')
+    .replace(/^[^\s[\]()]*\)/, '')
+    .replace(/\[([^\]]*)\](\([^)]*)?$/, '$1')
+    .replace(/\[([^\]]*)$/, '$1');
+  let text = '';
+  let hit = null;
+  let last = 0;
+  for (const match of cleaned.matchAll(ANNOTATED)) {
+    text += cleaned.slice(last, match.index);
+    if (!hit && match[2].includes('_hit_term') && match[1].trim()) hit = [text.length, text.length + match[1].length];
+    text += match[1];
+    last = match.index + match[0].length;
+  }
+  text += cleaned.slice(last);
+  if (!hit) return text.trim();
+  const start = text.lastIndexOf(' ', Math.max(0, hit[0] - SNIPPET_CONTEXT)) + 1;
+  const after = text.indexOf(' ', Math.min(text.length, hit[1] + SNIPPET_CONTEXT));
+  return text.slice(start, after < 0 ? text.length : after).trim();
+}
+
+// The viewer on globalise.nl highlights a search on the scan when its link carries the query (`q`,
+// in the portal's search syntax) and a snippet. The prototype's syntax (pills, NOT IN, regions,
+// proximity) doesn't translate, so `q` is the words that were highlighted in the document's
+// snippets, each quoted, joined by OR: the viewer then highlights those words.
+const MAX_HIT_TERMS = 20;
+export function hitQuery(fragments) {
+  const terms = new Map();
+  for (const fragment of fragments) {
+    for (const match of String(fragment || '').matchAll(ANNOTATED)) {
+      const text = match[1].replace(/\s+/g, ' ').trim();
+      if (!match[2].includes('_hit_term') || !text) continue;
+      const key = text.toLowerCase();
+      if (!terms.has(key) && terms.size < MAX_HIT_TERMS) terms.set(key, text);
+    }
+  }
+  return [...terms.values()].map((term) => `"${term.replace(/["\\]/g, '\\$&')}"`).join(' OR ');
+}
+
 // Words of a fragment, with which ones are hits. Annotation markup is dropped.
 const ANNOTATED = /\[([^\]]*)\]\(([^)]*)\)/g;
 export function fragmentWords(fragment) {

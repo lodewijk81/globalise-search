@@ -27,7 +27,7 @@ import { conceptLabelsEn } from '../proposal/labels.js';
 import { ANY_FIELDS, completionSource } from '../proposal/suggest.js';
 import { conceptCard, conceptCardIds, narrowerConcepts } from '../proposal/conceptcard.js';
 import { activeVariants, compactQuery, expandTree, fetchExpansions, lexicalTerms, msearchBatched, offKey, QueryTooLargeError } from './expansion.js';
-import { documentScans, fractions, locate, positionsBody, scanNumber, scanThumbnail } from './scans.js';
+import { documentScans, fractions, hitQuery, locate, positionsBody, scanNumber, scanThumbnail, snippetText } from './scans.js';
 
 const $ = (selector) => document.querySelector(selector);
 const tabsEl = $('#scope-tabs');
@@ -832,20 +832,22 @@ async function locateSnippets(card, paragraphs) {
   ]);
   const where = batches.flatMap((batch, i) => fractions(responses[i]?.hits?.hits?.[0]?.fields?.positions, batch.length));
   const scans = documentScans(hit._source, manifest);
+  // The words highlighted in all of the card's snippets, for highlighting on the scan.
+  const q = hitQuery([...card.querySelectorAll('.result-snippet')].map((p) => snippetFragments.get(p)));
   let hint = null;
   for (const [i, paragraph] of todo.entries()) {
     if (!card.isConnected) return; // a new search replaced the results
     const found = await locate(fragments[i], scans, where[i], hint).catch(() => null);
     if (found) hint = found.position;
-    showScan(paragraph, hit._source, manifest, scans, found);
+    showScan(paragraph, hit._source, manifest, scans, found, { q, snippet: snippetText(fragments[i]) });
   }
 }
 
-function showScan(paragraph, doc, manifest, scans, found) {
+function showScan(paragraph, doc, manifest, scans, found, highlight) {
   const label = paragraph.querySelector(':scope > .scan-tag');
   const thumb = paragraph.parentElement?.querySelector(':scope > .snippet-thumb');
   paragraph.dataset.located = found ? 'yes' : 'no';
-  const url = viewerUrl(doc, found?.scan);
+  const url = viewerUrl(doc, found?.scan, highlight);
   paragraph.dataset.viewer = url;
   [label, thumb].forEach((link) => {
     if (!link) return;
@@ -855,7 +857,7 @@ function showScan(paragraph, doc, manifest, scans, found) {
   if (!found) {
     if (label) {
       label.textContent = 'Scan ?';
-      label.title = 'This passage could not be found on a scan. Opens the first scan of the document.';
+      label.title = 'This passage could not be found on a scan here. Opens the document in the viewer, which looks for it.';
     }
     if (thumb) thumb.title = label?.title || '';
     return;
